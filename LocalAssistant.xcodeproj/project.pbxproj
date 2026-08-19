@@ -16,6 +16,15 @@
 		100000000000000000000007 /* FeatureCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* FeatureCard.swift */; };
 		100000000000000000000008 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000008 /* SettingsView.swift */; };
 		100000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Assets.xcassets */; };
+		100000000000000000000010 /* AIProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* AIProvider.swift */; };
+		100000000000000000000011 /* UserSkill.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* UserSkill.swift */; };
+		100000000000000000000012 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* KeychainStore.swift */; };
+		100000000000000000000013 /* AISettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* AISettingsStore.swift */; };
+		100000000000000000000014 /* AIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* AIService.swift */; };
+		100000000000000000000015 /* SkillStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* SkillStore.swift */; };
+		100000000000000000000016 /* SkillGenerationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* SkillGenerationService.swift */; };
+		100000000000000000000017 /* SkillCreatorWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* SkillCreatorWindowController.swift */; };
+		100000000000000000000018 /* SkillCreatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000019 /* SkillCreatorView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +38,15 @@
 		200000000000000000000008 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		200000000000000000000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		200000000000000000000010 /* LocalAssistant.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocalAssistant.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000011 /* AIProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIProvider.swift; sourceTree = "<group>"; };
+		200000000000000000000012 /* UserSkill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserSkill.swift; sourceTree = "<group>"; };
+		200000000000000000000013 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		200000000000000000000014 /* AISettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AISettingsStore.swift; sourceTree = "<group>"; };
+		200000000000000000000015 /* AIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIService.swift; sourceTree = "<group>"; };
+		200000000000000000000016 /* SkillStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillStore.swift; sourceTree = "<group>"; };
+		200000000000000000000017 /* SkillGenerationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillGenerationService.swift; sourceTree = "<group>"; };
+		200000000000000000000018 /* SkillCreatorWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillCreatorWindowController.swift; sourceTree = "<group>"; };
+		200000000000000000000019 /* SkillCreatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillCreatorView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -76,6 +94,12 @@
 			children = (
 				200000000000000000000003 /* GlobalHotKey.swift */,
 				200000000000000000000004 /* PanelController.swift */,
+				200000000000000000000013 /* KeychainStore.swift */,
+				200000000000000000000014 /* AISettingsStore.swift */,
+				200000000000000000000015 /* AIService.swift */,
+				200000000000000000000016 /* SkillStore.swift */,
+				200000000000000000000017 /* SkillGenerationService.swift */,
+				200000000000000000000018 /* SkillCreatorWindowController.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -84,6 +108,8 @@
 			isa = PBXGroup;
 			children = (
 				200000000000000000000005 /* FeatureItem.swift */,
+				200000000000000000000011 /* AIProvider.swift */,
+				200000000000000000000012 /* UserSkill.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -94,6 +120,7 @@
 				200000000000000000000006 /* AssistantPanelView.swift */,
 				200000000000000000000007 /* FeatureCard.swift */,
 				200000000000000000000008 /* SettingsView.swift */,
+				200000000000000000000019 /* SkillCreatorView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -183,6 +210,15 @@
 				100000000000000000000006 /* AssistantPanelView.swift in Sources */,
 				100000000000000000000007 /* FeatureCard.swift in Sources */,
 				100000000000000000000008 /* SettingsView.swift in Sources */,
+				100000000000000000000010 /* AIProvider.swift in Sources */,
+				100000000000000000000011 /* UserSkill.swift in Sources */,
+				100000000000000000000012 /* KeychainStore.swift in Sources */,
+				100000000000000000000013 /* AISettingsStore.swift in Sources */,
+				100000000000000000000014 /* AIService.swift in Sources */,
+				100000000000000000000015 /* SkillStore.swift in Sources */,
+				100000000000000000000016 /* SkillGenerationService.swift in Sources */,
+				100000000000000000000017 /* SkillCreatorWindowController.swift in Sources */,
+				100000000000000000000018 /* SkillCreatorView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -375,4 +411,3 @@
 	};
 	rootObject = 600000000000000000000001 /* Project object */;
 }
-

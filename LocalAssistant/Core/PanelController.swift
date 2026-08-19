@@ -129,7 +129,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private func makeWindow() -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -137,7 +137,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
         window.title = "Local Assistant 设置"
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 560, height: 420)
+        window.minSize = NSSize(width: 660, height: 500)
         window.delegate = self
         window.contentView = NSHostingView(rootView: SettingsView())
         return window

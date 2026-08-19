@@ -3,6 +3,8 @@ import SwiftUI
 
 struct AssistantPanelView: View {
     @AppStorage("recentSkillIDs") private var recentSkillIDs = "ocr,summarize,files,rewrite"
+    @ObservedObject private var skillStore = SkillStore.shared
+    @ObservedObject private var aiSettings = AISettingsStore.shared
     @FocusState private var searchIsFocused: Bool
 
     @State private var prompt = ""
@@ -11,6 +13,7 @@ struct AssistantPanelView: View {
     @State private var isThinking = false
     @State private var copied = false
     @State private var requestID = UUID()
+    @State private var activeTask: Task<Void, Never>?
 
     var body: some View {
         panelContent
@@ -139,9 +142,9 @@ struct AssistantPanelView: View {
 
             HStack(spacing: 5) {
                 Circle()
-                    .fill(Color.green)
+                    .fill(aiSettings.isConfigured() ? Color.green : Color.secondary)
                     .frame(width: 6, height: 6)
-                Text("本地")
+                Text(aiSettings.isConfigured() ? aiSettings.selectedProvider.shortName : "本地")
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -195,12 +198,12 @@ struct AssistantPanelView: View {
 
                 Spacer()
 
-                Text(isPredicting ? "\(visibleSkills.count) 项匹配" : "选择一项立即开始")
+                Text(isPredicting ? "\(totalVisibleCount) 项匹配" : "选择一项立即开始")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.tertiary)
             }
 
-            if visibleSkills.isEmpty {
+            if totalVisibleCount == 0 {
                 HStack(spacing: 10) {
                     Image(systemName: "sparkle.magnifyingglass")
                         .foregroundStyle(.secondary)
@@ -220,12 +223,23 @@ struct AssistantPanelView: View {
                 .background(Color.primary.opacity(0.032), in: RoundedRectangle(cornerRadius: 21, style: .continuous))
             } else {
                 VStack(spacing: 2) {
-                    ForEach(visibleSkills.indices, id: \.self) { index in
-                        let skill = visibleSkills[index]
+                    ForEach(visibleUserSkills.indices, id: \.self) { index in
+                        let skill = visibleUserSkills[index]
+                        UserSkillSuggestionRow(
+                            skill: skill,
+                            badge: isPredicting ? "我的技能" : (index == 0 ? "最近创建" : "我的技能"),
+                            isBestMatch: isPredicting && index == 0
+                        ) {
+                            run(skill)
+                        }
+                    }
+
+                    ForEach(displayedBuiltInSkills.indices, id: \.self) { index in
+                        let skill = displayedBuiltInSkills[index]
                         SkillSuggestionRow(
                             skill: skill,
-                            badge: isPredicting ? skill.commandName : (index == 0 ? "最近使用" : "推荐"),
-                            isBestMatch: isPredicting && index == 0
+                            badge: isPredicting ? skill.commandName : (visibleUserSkills.isEmpty && index == 0 ? "最近使用" : "推荐"),
+                            isBestMatch: isPredicting && visibleUserSkills.isEmpty && index == 0
                         ) {
                             run(skill)
                         }
@@ -260,7 +274,7 @@ struct AssistantPanelView: View {
             Text("正在理解你的请求")
                 .font(.system(size: 13.5, weight: .semibold))
 
-            Text("模拟本地模型选择合适的技能…")
+            Text(aiSettings.isConfigured() ? "正在调用 \(aiSettings.selectedProvider.displayName)…" : "正在匹配本地命令与技能…")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
 
@@ -289,7 +303,7 @@ struct AssistantPanelView: View {
 
                     Spacer()
 
-                    Text("界面演示")
+                    Text(response.badge)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Color.indigo)
                         .padding(.horizontal, 8)
@@ -341,10 +355,13 @@ struct AssistantPanelView: View {
         HStack(spacing: 14) {
             Label("Local Assistant", systemImage: "sparkles")
 
-            Text("UI 原型")
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.05), in: Capsule())
+            Button {
+                SkillCreatorWindowController.shared.show()
+            } label: {
+                Label("创建技能", systemImage: "plus")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
 
             Spacer()
 
@@ -378,6 +395,21 @@ struct AssistantPanelView: View {
 
     private var visibleSkills: [FeatureItem] {
         isPredicting ? predictedSkills(for: trimmedPrompt) : recommendedSkills
+    }
+
+    private var visibleUserSkills: [UserSkill] {
+        if isPredicting {
+            return Array(predictedUserSkills(for: trimmedPrompt).prefix(3))
+        }
+        return Array(skillStore.skills.filter(\.isEnabled).prefix(1))
+    }
+
+    private var displayedBuiltInSkills: [FeatureItem] {
+        Array(visibleSkills.prefix(max(0, 4 - visibleUserSkills.count)))
+    }
+
+    private var totalVisibleCount: Int {
+        visibleUserSkills.count + displayedBuiltInSkills.count
     }
 
     private func predictedSkills(for rawQuery: String) -> [FeatureItem] {
@@ -415,6 +447,31 @@ struct AssistantPanelView: View {
             .map(\.skill)
     }
 
+    private func predictedUserSkills(for rawQuery: String) -> [UserSkill] {
+        let query = normalized(rawQuery)
+        guard !query.isEmpty else { return skillStore.skills.filter(\.isEnabled) }
+
+        return skillStore.skills
+            .filter(\.isEnabled)
+            .compactMap { skill -> (skill: UserSkill, score: Int)? in
+                let scores = skill.searchTerms.compactMap { term -> Int? in
+                    let candidate = normalized(term)
+                    if candidate == query { return 0 }
+                    if candidate.hasPrefix(query) { return 10 + candidate.count - query.count }
+                    if query.count >= 2, let range = candidate.range(of: query) {
+                        return 100 + candidate.distance(from: candidate.startIndex, to: range.lowerBound)
+                    }
+                    return nil
+                }
+                guard let score = scores.min() else { return nil }
+                return (skill, score)
+            }
+            .sorted { lhs, rhs in
+                lhs.score == rhs.score ? lhs.skill.name < rhs.skill.name : lhs.score < rhs.score
+            }
+            .map(\.skill)
+    }
+
     private func normalized(_ value: String) -> String {
         value
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -422,6 +479,10 @@ struct AssistantPanelView: View {
     }
 
     private func executeCurrentInput() {
+        if let userSkill = predictedUserSkills(for: trimmedPrompt).first {
+            run(userSkill)
+            return
+        }
         let preferredSkill = predictedSkills(for: trimmedPrompt).first
         submit(prompt, preferredSkill: preferredSkill)
     }
@@ -431,11 +492,18 @@ struct AssistantPanelView: View {
         submit(skill.samplePrompt, preferredSkill: skill)
     }
 
+    private func run(_ skill: UserSkill) {
+        let input = trimmedPrompt.isEmpty ? skill.name : trimmedPrompt
+        prompt = input
+        submit(skill, input: input)
+    }
+
     private func submit(_ rawPrompt: String, preferredSkill: FeatureItem? = nil) {
         let trimmed = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
         let currentRequestID = UUID()
+        activeTask?.cancel()
         requestID = currentRequestID
         submittedPrompt = trimmed
         copied = false
@@ -450,11 +518,133 @@ struct AssistantPanelView: View {
             remember(matchedSkill)
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) {
-            guard requestID == currentRequestID else { return }
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
-                isThinking = false
-                response = makeResponse(skill: matchedSkill)
+        if let matchedSkill {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+                finish(makeResponse(skill: matchedSkill), requestID: currentRequestID)
+            }
+            return
+        }
+
+        guard aiSettings.isConfigured() else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+                finish(
+                    DemoResponse(
+                        title: "需要配置 AI 服务",
+                        body: "我没有匹配到明确的本地命令。请从菜单栏打开“设置 → AI 服务”，保存 DeepSeek、GLM、Gemini 或 OpenAI 的 API Key；之后这里会直接显示真实回答。",
+                        skillName: "自由问答尚未连接",
+                        icon: "key.horizontal",
+                        tint: .orange,
+                        badge: "需要设置"
+                    ),
+                    requestID: currentRequestID
+                )
+            }
+            return
+        }
+
+        activeTask = Task {
+            do {
+                let answer = try await AIService.shared.generateText(
+                    prompt: trimmed,
+                    system: "你是一个运行在 macOS 快捷面板中的个人助手。直接、简洁地回答用户，不要声称执行了任何尚未调用的系统工具。",
+                    maxTokens: 700
+                )
+                guard !Task.isCancelled else { return }
+                finish(
+                    DemoResponse(
+                        title: "问答结果",
+                        body: answer,
+                        skillName: "由 \(aiSettings.selectedProvider.displayName) 回答",
+                        icon: "bubble.left.and.text.bubble.right",
+                        tint: .indigo,
+                        badge: aiSettings.selectedProvider.shortName
+                    ),
+                    requestID: currentRequestID
+                )
+            } catch {
+                guard !Task.isCancelled else { return }
+                finish(errorResponse(error), requestID: currentRequestID)
+            }
+        }
+    }
+
+    private func submit(_ skill: UserSkill, input: String) {
+        let currentRequestID = UUID()
+        activeTask?.cancel()
+        requestID = currentRequestID
+        submittedPrompt = input
+        copied = false
+
+        withAnimation(.easeOut(duration: 0.16)) {
+            response = nil
+            isThinking = true
+        }
+
+        let unavailableTools = skill.requiredTools.filter { tool in
+            let normalizedTool = tool.lowercased()
+            return !["model", "text_generation", "translate", "summarize", "rewrite"].contains(normalizedTool)
+        }
+
+        if !unavailableTools.isEmpty {
+            let steps = skill.actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+            let missing = unavailableTools.joined(separator: "、")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                finish(
+                    DemoResponse(
+                        title: skill.name,
+                        body: "这项技能已经保存并成功匹配，但还不能完整执行。\n\n计划：\n\(steps)\n\n还需要接入：\(missing)\n\n完成对应系统工具后，不需要重新创建技能，它会直接使用现有定义运行。",
+                        skillName: "我的技能 · \(skill.generatedBy)",
+                        icon: "bolt.fill",
+                        tint: .purple,
+                        badge: "等待工具"
+                    ),
+                    requestID: currentRequestID
+                )
+            }
+            return
+        }
+
+        guard aiSettings.isConfigured() else {
+            finish(
+                DemoResponse(
+                    title: skill.name,
+                    body: "技能已经匹配，但它需要模型处理文字。请先在设置中配置 AI 服务。\n\n执行计划：\n" + skill.actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n"),
+                    skillName: "我的技能",
+                    icon: "bolt.fill",
+                    tint: .purple,
+                    badge: "需要设置"
+                ),
+                requestID: currentRequestID
+            )
+            return
+        }
+
+        let system = """
+        你正在执行用户保存的个人技能“\(skill.name)”。
+        原始需求：\(skill.originalRequest)
+        执行步骤：\(skill.actions.joined(separator: "；"))
+        输出要求：\(skill.output)
+        只返回最终交付给用户的内容。不要声称访问了未提供的文件、屏幕、剪贴板或应用数据。
+        """
+
+        activeTask = Task {
+            do {
+                let answer = try await AIService.shared.generateText(prompt: input, system: system, maxTokens: 900)
+                guard !Task.isCancelled else { return }
+                finish(
+                    DemoResponse(
+                        title: skill.name,
+                        body: answer,
+                        skillName: "我的技能 · \(skill.generatedBy)",
+                        icon: "bolt.fill",
+                        tint: .purple,
+                        badge: aiSettings.selectedProvider.shortName
+                    ),
+                    requestID: currentRequestID
+                )
+            } catch {
+                guard !Task.isCancelled else { return }
+                finish(errorResponse(error), requestID: currentRequestID)
             }
         }
     }
@@ -487,7 +677,8 @@ struct AssistantPanelView: View {
                 body: skill.demoResponse,
                 skillName: "已匹配 · \(skill.title)",
                 icon: skill.icon,
-                tint: skill.tint
+                tint: skill.tint,
+                badge: "功能雏形"
             )
         }
 
@@ -496,7 +687,27 @@ struct AssistantPanelView: View {
             body: "这是当前问答界面的演示回答。接入本地模型后，我会先理解你的意图，再选择合适的安全工具；普通问题则会直接在这里给出简短回答。",
             skillName: "自由问答",
             icon: "bubble.left.and.text.bubble.right",
-            tint: .indigo
+            tint: .indigo,
+            badge: "本地"
+        )
+    }
+
+    private func finish(_ newResponse: DemoResponse, requestID expectedID: UUID) {
+        guard requestID == expectedID else { return }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+            isThinking = false
+            response = newResponse
+        }
+    }
+
+    private func errorResponse(_ error: Error) -> DemoResponse {
+        DemoResponse(
+            title: "请求没有完成",
+            body: error.localizedDescription,
+            skillName: aiSettings.selectedProvider.displayName,
+            icon: "exclamationmark.triangle.fill",
+            tint: .red,
+            badge: "连接错误"
         )
     }
 
@@ -514,6 +725,8 @@ struct AssistantPanelView: View {
     }
 
     private func resetConversation() {
+        activeTask?.cancel()
+        activeTask = nil
         requestID = UUID()
         prompt = ""
         submittedPrompt = ""
@@ -581,6 +794,63 @@ private struct SkillSuggestionRow: View {
     }
 }
 
+private struct UserSkillSuggestionRow: View {
+    let skill: UserSkill
+    let badge: String
+    let isBestMatch: Bool
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.purple)
+                    .frame(width: 32, height: 32)
+                    .background(Color.purple.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(skill.name)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text(skill.summary)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Text(badge)
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(Color.purple)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Color.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 56)
+            .background(
+                (isHovering || isBestMatch) ? Color.primary.opacity(0.065) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+    }
+}
+
 private struct KeyHint: View {
     let keys: String
     let label: String
@@ -603,6 +873,7 @@ private struct DemoResponse {
     let skillName: String
     let icon: String
     let tint: Color
+    let badge: String
 }
 
 #Preview {

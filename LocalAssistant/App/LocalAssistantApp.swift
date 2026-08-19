@@ -14,6 +14,14 @@ struct LocalAssistantApp: App {
             Divider()
 
             Button {
+                SkillCreatorWindowController.shared.show()
+            } label: {
+                Label("创建自定义指令…", systemImage: "plus.square.dashed")
+            }
+
+            Divider()
+
+            Button {
                 SettingsWindowController.shared.show()
             } label: {
                 Label("设置…", systemImage: "gearshape")
