@@ -1,5 +1,15 @@
 # 版本日志
 
+## 1.4 Beta · 2026-08-21
+
+- 建立最小 Tool Registry 与顺序 Workflow Engine。
+- 实装 `clipboard.readText`、`model.generateText`、`clipboard.writeText`。
+- 打通“读取剪贴板 → 云端翻译 → 显示并写回剪贴板”的真实工作流。
+- 兼容没有 `workflow` 和 `modelTask` 的旧版 `clipboard + translate` 技能。
+- 增加逐步耗时、错误传播和不记录正文的脱敏执行日志。
+- 技能列表与编辑页纳入同一套前进/后退历史，返回列表后可以再次前进到刚才的技能。
+- 普通模型任务明确要求直接输出 Markdown；模型误回纯 JSON 时自动转换为可读内容，明确要求 JSON 的技能不受影响。
+
 ## 1.3 Beta · 2026-08-20
 
 本版本主要完善 macOS 原生界面、技能创建流程和技能生命周期管理。它仍是核心功能原型，不代表 OCR、文件操作等底层工具已经全部可用。

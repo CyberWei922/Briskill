@@ -33,6 +33,7 @@
 		100000000000000000000024 /* ConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000025 /* ConsoleView.swift */; };
 		100000000000000000000025 /* GenerationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000026 /* GenerationHistoryView.swift */; };
 		100000000000000000000026 /* MarkdownContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000027 /* MarkdownContentView.swift */; };
+		100000000000000000000027 /* ToolExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000028 /* ToolExecution.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -63,6 +64,7 @@
 		200000000000000000000025 /* ConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleView.swift; sourceTree = "<group>"; };
 		200000000000000000000026 /* GenerationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationHistoryView.swift; sourceTree = "<group>"; };
 		200000000000000000000027 /* MarkdownContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownContentView.swift; sourceTree = "<group>"; };
+		200000000000000000000028 /* ToolExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolExecution.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -119,6 +121,7 @@
 				200000000000000000000022 /* AppConsole.swift */,
 				200000000000000000000023 /* GenerationHistoryStore.swift */,
 				200000000000000000000024 /* ConsoleWindowController.swift */,
+				200000000000000000000028 /* ToolExecution.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -251,6 +254,7 @@
 				100000000000000000000024 /* ConsoleView.swift in Sources */,
 				100000000000000000000025 /* GenerationHistoryView.swift in Sources */,
 				100000000000000000000026 /* MarkdownContentView.swift in Sources */,
+				100000000000000000000027 /* ToolExecution.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

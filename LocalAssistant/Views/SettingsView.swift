@@ -237,6 +237,7 @@ private struct SettingsPageHeader: View {
 
             Spacer()
         }
+        .offset(y: 3)
         .padding(.horizontal, 18)
         .frame(height: 50)
         .overlay(alignment: .bottom) {
@@ -259,9 +260,9 @@ private struct SettingsHistoryControl: View {
         HStack(spacing: 0) {
             Button(action: goBack) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(canGoBack ? Color.primary.opacity(0.88) : Color.secondary.opacity(0.24))
-                    .frame(width: 42, height: 32)
+                    .frame(width: 33, height: 28)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -269,13 +270,13 @@ private struct SettingsHistoryControl: View {
             .help(canGoBack ? "后退" : "没有可后退的页面")
 
             Divider()
-                .frame(height: 20)
+                .frame(height: 18)
 
             Button(action: goForward) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(canGoForward ? Color.primary.opacity(0.88) : Color.secondary.opacity(0.24))
-                    .frame(width: 42, height: 32)
+                    .frame(width: 33, height: 28)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -331,6 +332,7 @@ private struct SkillManagementView: View {
     @State private var message: SkillManagementMessage?
     @State private var skillPendingDeletion: UserSkill?
     @State private var isLibraryScrolled = false
+    @State private var forwardEditingSkillID: UUID?
 
     var body: some View {
         Group {
@@ -338,10 +340,7 @@ private struct SkillManagementView: View {
                 SkillEditorView(
                     skill: skill,
                     message: message,
-                    onBack: {
-                        editingSkillID = nil
-                        message = nil
-                    },
+                    onBack: closeEditorForBack,
                     canGoForward: canGoForward,
                     goForward: goForward,
                     onSave: save,
@@ -355,9 +354,9 @@ private struct SkillManagementView: View {
                         title: SettingsSection.skills.title,
                         showsSeparator: isLibraryScrolled,
                         canGoBack: canGoBack,
-                        canGoForward: canGoForward,
+                        canGoForward: forwardEditingSkillID != nil || canGoForward,
                         goBack: goBack,
-                        goForward: goForward
+                        goForward: moveForwardFromLibrary
                     )
                     skillLibrary
                 }
@@ -367,6 +366,10 @@ private struct SkillManagementView: View {
             if let editingSkillID,
                !skillStore.skills.contains(where: { $0.id == editingSkillID }) {
                 self.editingSkillID = nil
+            }
+            if let forwardEditingSkillID,
+               !skillStore.skills.contains(where: { $0.id == forwardEditingSkillID }) {
+                self.forwardEditingSkillID = nil
             }
         }
         .alert(
@@ -476,7 +479,25 @@ private struct SkillManagementView: View {
 
     private func openEditor(for skill: UserSkill) {
         editingSkillID = skill.id
+        forwardEditingSkillID = nil
         message = nil
+    }
+
+    private func closeEditorForBack() {
+        forwardEditingSkillID = editingSkillID
+        editingSkillID = nil
+        message = nil
+    }
+
+    private func moveForwardFromLibrary() {
+        if let forwardEditingSkillID,
+           skillStore.skills.contains(where: { $0.id == forwardEditingSkillID }) {
+            editingSkillID = forwardEditingSkillID
+            self.forwardEditingSkillID = nil
+            message = nil
+        } else {
+            goForward()
+        }
     }
 
     private func save(_ editedSkill: UserSkill) {
@@ -529,6 +550,7 @@ private struct SkillManagementView: View {
             try skillStore.delete(skill)
             skillPendingDeletion = nil
             if editingSkillID == skill.id { editingSkillID = nil }
+            if forwardEditingSkillID == skill.id { forwardEditingSkillID = nil }
             message = SkillManagementMessage(text: "已删除 \(skill.name)", isError: false)
         } catch {
             message = SkillManagementMessage(text: error.localizedDescription, isError: true)
@@ -647,6 +669,7 @@ private struct SkillEditorView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
             }
+            .offset(y: 3)
             .padding(.horizontal, 18)
             .frame(height: 50)
             .overlay(alignment: .bottom) {

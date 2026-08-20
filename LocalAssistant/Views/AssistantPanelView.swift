@@ -1039,80 +1039,6 @@ struct AssistantPanelView: View {
             isThinking = true
         }
 
-        if skill.resolvedExecutionMode == .localOnly {
-            let steps = skill.actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-            let tools = skill.requiredTools.isEmpty ? "尚未声明工具" : skill.requiredTools.joined(separator: "、")
-            AppConsole.shared.info(
-                "本地技能“\(skill.name)”已匹配；不会调用云端模型；工具=\(tools)",
-                category: "Assistant"
-            )
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                finish(
-                    DemoResponse(
-                        title: skill.name,
-                        body: "这是一项仅在本机运行的技能，不会调用云端大模型。\n\n本次参数：\n\(runtimeParameterSummary.isEmpty ? "无" : runtimeParameterSummary)\n\n计划：\n\(steps)\n\n所需工具：\(tools)\n\n参数已经传入并保存到本次运行上下文；对应 Tool Executor 接入后会直接按现有定义运行，无需重新创建。",
-                        skillName: "我的技能 · 本地执行",
-                        icon: "desktopcomputer",
-                        tint: .green,
-                        badge: "本地"
-                    ),
-                    requestID: currentRequestID
-                )
-            }
-            return
-        }
-
-        let unavailableTools = skill.requiredTools.filter { tool in
-            let normalizedTool = tool.lowercased().replacingOccurrences(of: "_", with: ".")
-            return ![
-                "model",
-                "model.generatetext",
-                "text.generation",
-                "translate",
-                "summarize",
-                "rewrite"
-            ].contains(normalizedTool)
-        }
-
-        if !unavailableTools.isEmpty {
-            AppConsole.shared.warning(
-                "用户技能“\(skill.name)”缺少工具：\(unavailableTools.joined(separator: "、"))",
-                category: "Assistant"
-            )
-            let steps = skill.actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-            let missing = unavailableTools.joined(separator: "、")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                finish(
-                    DemoResponse(
-                        title: skill.name,
-                        body: "这项技能已经保存并成功匹配，但还不能完整执行。\n\n计划：\n\(steps)\n\n还需要接入：\(missing)\n\n完成对应系统工具后，不需要重新创建技能，它会直接使用现有定义运行。",
-                        skillName: "我的技能 · \(skill.generatedBy)",
-                        icon: "bolt.fill",
-                        tint: .purple,
-                        badge: "等待工具"
-                    ),
-                    requestID: currentRequestID
-                )
-            }
-            return
-        }
-
-        guard aiSettings.isConfigured() else {
-            AppConsole.shared.warning("用户技能“\(skill.name)”需要 AI，但尚未配置服务", category: "Assistant")
-            finish(
-                DemoResponse(
-                    title: skill.name,
-                    body: "技能已经匹配，但它需要模型处理文字。请先在设置中配置 AI 服务。\n\n执行计划：\n" + skill.actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n"),
-                    skillName: "我的技能",
-                    icon: "bolt.fill",
-                    tint: .purple,
-                    badge: "需要设置"
-                ),
-                requestID: currentRequestID
-            )
-            return
-        }
-
         if files.values.contains(where: { !$0.isEmpty }) {
             AppConsole.shared.warning(
                 "技能“\(skill.name)”已接收文件参数，但当前统一模型执行器尚未发送多模态内容",
@@ -1132,41 +1058,56 @@ struct AssistantPanelView: View {
             return
         }
 
-        let system = """
-        你正在通过统一的 model.generateText 工具执行用户保存的个人技能“\(skill.name)”。
-        严格执行运行时提示词模板，只返回最终交付给用户的内容。
-        不要声称访问了未由前序工具实际提供的文件、屏幕、剪贴板或应用数据。
-        输出要求：\(skill.output)
-        """
-        var runtimePrompt = (skill.modelTask?.promptTemplate ?? skill.originalRequest)
-            .replacingOccurrences(of: "{{userInput}}", with: input)
-        for parameter in skill.resolvedParameters {
-            let value = values[parameter.id] ?? files[parameter.id]?.first?.path ?? ""
-            runtimePrompt = runtimePrompt.replacingOccurrences(of: "{{\(parameter.name)}}", with: value)
-        }
-        if !runtimeParameterSummary.isEmpty {
-            runtimePrompt += "\n\n<runtime_parameters>\n\(runtimeParameterSummary)\n</runtime_parameters>"
-        }
+        switch WorkflowEngine.shared.readiness(for: skill) {
+        case .unavailable(let unavailableTools):
+            AppConsole.shared.warning(
+                "用户技能“\(skill.name)”缺少执行能力：\(unavailableTools.joined(separator: "、"))",
+                category: "Assistant"
+            )
+            let steps = skill.actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+            let missing = unavailableTools.joined(separator: "、")
+            finish(
+                DemoResponse(
+                    title: skill.name,
+                    body: "这项技能已经保存并成功匹配，但还不能完整执行。\n\n计划：\n\(steps)\n\n还需要接入：\(missing)\n\n完成对应系统工具后，不需要重新创建技能，它会直接使用现有定义运行。",
+                    skillName: "我的技能 · \(skill.generatedBy)",
+                    icon: "bolt.fill",
+                    tint: .purple,
+                    badge: "等待工具"
+                ),
+                requestID: currentRequestID
+            )
 
-        activeTask = Task {
-            do {
-                let answer = try await AIService.shared.generateText(prompt: runtimePrompt, system: system, maxTokens: 900)
-                guard !Task.isCancelled else { return }
-                finish(
-                    DemoResponse(
-                        title: skill.name,
-                        body: answer,
-                        skillName: "我的技能 · \(skill.generatedBy)",
-                        icon: "bolt.fill",
-                        tint: .purple,
-                        badge: aiSettings.selectedProvider.shortName
-                    ),
-                    requestID: currentRequestID
-                )
-            } catch {
-                guard !Task.isCancelled else { return }
-                AppConsole.shared.error("用户技能“\(skill.name)”执行失败：\(error.localizedDescription)", category: "Assistant")
-                finish(errorResponse(error), requestID: currentRequestID)
+        case .ready:
+            activeTask = Task {
+                do {
+                    let result = try await WorkflowEngine.shared.execute(
+                        skill: skill,
+                        input: input,
+                        values: values,
+                        files: files
+                    )
+                    guard !Task.isCancelled else { return }
+                    copied = result.didWriteClipboard
+                    let sourceName = skill.resolvedExecutionMode == .localOnly
+                        ? "我的技能 · 本地执行"
+                        : "我的技能 · \(skill.generatedBy)"
+                    finish(
+                        DemoResponse(
+                            title: skill.name,
+                            body: result.outputText,
+                            skillName: sourceName,
+                            icon: result.didWriteClipboard ? "doc.on.clipboard.fill" : "bolt.fill",
+                            tint: result.didWriteClipboard ? .green : .purple,
+                            badge: result.didWriteClipboard ? "已复制" : aiSettings.selectedProvider.shortName
+                        ),
+                        requestID: currentRequestID
+                    )
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    AppConsole.shared.error("用户技能“\(skill.name)”执行失败：\(error.localizedDescription)", category: "Assistant")
+                    finish(errorResponse(error), requestID: currentRequestID)
+                }
             }
         }
     }
@@ -1227,13 +1168,14 @@ struct AssistantPanelView: View {
     }
 
     private func errorResponse(_ error: Error) -> DemoResponse {
-        DemoResponse(
+        let isToolError = error is ToolExecutionError
+        return DemoResponse(
             title: "请求没有完成",
             body: error.localizedDescription,
-            skillName: aiSettings.selectedProvider.displayName,
+            skillName: isToolError ? "本地工作流" : aiSettings.selectedProvider.displayName,
             icon: "exclamationmark.triangle.fill",
             tint: .red,
-            badge: "连接错误"
+            badge: isToolError ? "执行错误" : "连接错误"
         )
     }
 
