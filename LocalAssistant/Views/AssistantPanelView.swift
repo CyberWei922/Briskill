@@ -19,7 +19,7 @@ struct AssistantPanelView: View {
     @State private var pendingSkill: UserSkill?
     @State private var parameterValues: [String: String] = [:]
     @State private var parameterFiles: [String: [URL]] = [:]
-    @State private var isDropTargeted = false
+    @State private var tabCompletion: PanelTabCompletion?
 
     var body: some View {
         panelContent
@@ -29,6 +29,11 @@ struct AssistantPanelView: View {
                 panelShape
                     .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.8)
             }
+            .overlay(alignment: .top) {
+                PanelDragRegion()
+                    .frame(height: 17)
+                    .padding(.horizontal, 52)
+            }
             .padding(14)
             .frame(minWidth: 720, minHeight: 450)
             .onAppear {
@@ -36,8 +41,8 @@ struct AssistantPanelView: View {
                     searchIsFocused = true
                 }
             }
-            .onChange(of: prompt) {
-                selectedSuggestionIndex = 0
+            .onChange(of: prompt) { oldValue, newValue in
+                handlePromptChange(from: oldValue, to: newValue)
             }
             .onDisappear {
                 PanelController.shared.setInteractionPinned(false)
@@ -145,12 +150,16 @@ struct AssistantPanelView: View {
                 .frame(width: 24)
 
             ZStack(alignment: .leading) {
-                if let completionSuffix {
+                if let inlineCompletion {
                     HStack(spacing: 0) {
                         Text(prompt)
                             .foregroundStyle(.clear)
-                        Text(completionSuffix)
+                        Text(inlineCompletion.commandSuffix)
                             .foregroundStyle(.tertiary)
+                        if let parameterHint = inlineCompletion.parameterHint {
+                            Text(" \(parameterHint)")
+                                .foregroundStyle(.quaternary)
+                        }
                     }
                     .font(.system(size: 19, weight: .regular))
                     .lineLimit(1)
@@ -165,7 +174,7 @@ struct AssistantPanelView: View {
                         executeCurrentInput()
                     }
                     .onKeyPress(.tab) {
-                        cycleSuggestion(by: 1) ? .handled : .ignored
+                        selectNextSuggestionWithTab() ? .handled : .ignored
                     }
                     .onKeyPress(.downArrow) {
                         cycleSuggestion(by: 1) ? .handled : .ignored
@@ -173,6 +182,46 @@ struct AssistantPanelView: View {
                     .onKeyPress(.upArrow) {
                         cycleSuggestion(by: -1) ? .handled : .ignored
                     }
+            }
+
+            if let attachedFile = firstAttachedFile {
+                HStack(spacing: 5) {
+                    Image(systemName: attachedFile.url.hasDirectoryPath ? "folder.fill" : "doc.fill")
+                        .foregroundStyle(Color.indigo)
+                    Text(attachedFile.url.lastPathComponent)
+                        .lineLimit(1)
+                        .frame(maxWidth: 100)
+                    Button {
+                        parameterFiles[attachedFile.parameter.id] = []
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .font(.system(size: 10.5))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.primary.opacity(0.055), in: Capsule())
+            }
+
+            if let fileParameter = nextUnfilledFileParameter {
+                Menu {
+                    Button("选择\(fileParameter.type.displayName)…") {
+                        chooseFiles(for: fileParameter)
+                    }
+                    Button("从剪贴板粘贴") {
+                        pasteFiles(for: fileParameter)
+                    }
+                } label: {
+                    Image(systemName: "paperclip")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("添加\(fileParameter.type.displayName)")
             }
 
             HStack(spacing: 5) {
@@ -209,6 +258,11 @@ struct AssistantPanelView: View {
         .onTapGesture {
             searchIsFocused = true
         }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let fileParameter = nextUnfilledFileParameter else { return false }
+            addFiles(urls, to: fileParameter)
+            return !urls.isEmpty
+        }
     }
 
     @ViewBuilder
@@ -220,7 +274,7 @@ struct AssistantPanelView: View {
             responseView(response)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         } else if let pendingSkill {
-            parameterEntryView(for: pendingSkill)
+            parameterGuidanceView(for: pendingSkill)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         } else {
             recommendations
@@ -228,146 +282,46 @@ struct AssistantPanelView: View {
         }
     }
 
-    private func parameterEntryView(for skill: UserSkill) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private func parameterGuidanceView(for skill: UserSkill) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(skill.name)
                         .font(.system(size: 14, weight: .semibold))
-                    Text("补充运行参数后执行")
+                    Text("所有参数都在上方命令框中输入")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("取消") {
-                    cancelParameterEntry(clearPrompt: false)
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
             }
 
-            ScrollView {
-                VStack(spacing: 9) {
-                    ForEach(skill.resolvedParameters) { parameter in
-                        parameterInput(for: parameter)
-                    }
-                }
-            }
-            .scrollIndicators(.automatic)
+            HStack(spacing: 10) {
+                Image(systemName: nextUnfilledFileParameter == nil ? "text.cursor" : "paperclip")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(Color.indigo)
+                    .frame(width: 34, height: 34)
+                    .background(Color.indigo.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            HStack(spacing: 8) {
-                if skill.resolvedParameters.contains(where: { $0.type.acceptsFiles }) {
-                    Label("面板已临时固定，可从 Finder 拖入", systemImage: "pin.fill")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(nextInlineParameterHint.map { "下一项：\($0)" } ?? "参数已经齐全")
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Text(parameterGuidanceDetail)
+                        .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
+
                 Spacer()
-                Text(missingRequiredParameters.isEmpty ? "参数已齐全，按回车执行" : "还需：\(missingRequiredParameters.joined(separator: "、"))")
-                    .foregroundStyle(missingRequiredParameters.isEmpty ? Color.green : Color.orange)
             }
-            .font(.system(size: 10.5))
+            .padding(12)
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+
+            Text(skill.executionExample)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 18)
         .padding(.top, 4)
         .padding(.bottom, 8)
-    }
-
-    @ViewBuilder
-    private func parameterInput(for parameter: SkillParameterDefinition) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Image(systemName: parameter.type.symbol)
-                    .foregroundStyle(.indigo)
-                Text(parameter.name)
-                    .fontWeight(.semibold)
-                Text(parameter.type.displayName)
-                    .foregroundStyle(.tertiary)
-                if !parameter.required {
-                    Text("可选")
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer()
-            }
-            .font(.system(size: 11))
-
-            switch parameter.type {
-            case .text, .number:
-                TextField(
-                    parameter.description.isEmpty ? "输入\(parameter.name)" : parameter.description,
-                    text: parameterTextBinding(parameter)
-                )
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 11)
-                .frame(height: 36)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            case .boolean:
-                Toggle("启用", isOn: parameterBooleanBinding(parameter))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-            case .file, .image, .folder:
-                fileInput(for: parameter)
-            }
-        }
-        .padding(10)
-        .background(Color.primary.opacity(0.028), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-    }
-
-    private func fileInput(for parameter: SkillParameterDefinition) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let urls = parameterFiles[parameter.id], !urls.isEmpty {
-                ForEach(urls, id: \.self) { url in
-                    HStack(spacing: 8) {
-                        Image(systemName: url.hasDirectoryPath ? "folder.fill" : "doc.fill")
-                            .foregroundStyle(.indigo)
-                        Text(url.lastPathComponent)
-                            .lineLimit(1)
-                        Spacer()
-                        Button {
-                            parameterFiles[parameter.id]?.removeAll { $0 == url }
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.tertiary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .font(.system(size: 11.5))
-                }
-            } else {
-                Text(parameter.description.isEmpty ? "拖拽到这里，或从下方选择" : parameter.description)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
-            }
-
-            HStack(spacing: 8) {
-                Button {
-                    chooseFiles(for: parameter)
-                } label: {
-                    Label("选择\(parameter.type.displayName)", systemImage: "folder")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button {
-                    pasteFiles(for: parameter)
-                } label: {
-                    Label("粘贴", systemImage: "doc.on.clipboard")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-        }
-        .padding(10)
-        .background(isDropTargeted ? Color.indigo.opacity(0.10) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(isDropTargeted ? Color.indigo.opacity(0.65) : Color.primary.opacity(0.08), style: StrokeStyle(lineWidth: 1, dash: [5]))
-        }
-        .dropDestination(for: URL.self) { urls, _ in
-            addFiles(urls, to: parameter)
-            return !urls.isEmpty
-        } isTargeted: { targeted in
-            isDropTargeted = targeted
-        }
     }
 
     private var recommendations: some View {
@@ -576,25 +530,52 @@ struct AssistantPanelView: View {
             if parameter.type.acceptsFiles {
                 return (parameterFiles[parameter.id]?.isEmpty == false) ? nil : parameter.name
             }
-            if parameter.type == .boolean { return nil }
             return parameterValues[parameter.id]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
                 ? nil
                 : parameter.name
         }
     }
 
-    private func parameterTextBinding(_ parameter: SkillParameterDefinition) -> Binding<String> {
-        Binding(
-            get: { parameterValues[parameter.id] ?? "" },
-            set: { parameterValues[parameter.id] = $0 }
-        )
+    private var nextUnfilledFileParameter: SkillParameterDefinition? {
+        pendingSkill?.resolvedParameters.first { parameter in
+            parameter.type.acceptsFiles && parameterFiles[parameter.id]?.isEmpty != false
+        }
     }
 
-    private func parameterBooleanBinding(_ parameter: SkillParameterDefinition) -> Binding<Bool> {
-        Binding(
-            get: { parameterValues[parameter.id] == "true" },
-            set: { parameterValues[parameter.id] = $0 ? "true" : "false" }
-        )
+    private var firstAttachedFile: (parameter: SkillParameterDefinition, url: URL)? {
+        guard let pendingSkill else { return nil }
+        for parameter in pendingSkill.resolvedParameters where parameter.type.acceptsFiles {
+            if let url = parameterFiles[parameter.id]?.first {
+                return (parameter, url)
+            }
+        }
+        return nil
+    }
+
+    private var nextInlineParameterHint: String? {
+        guard let pendingSkill else { return nil }
+        if let fileParameter = nextUnfilledFileParameter {
+            return fileParameter.name
+        }
+
+        let valueParameters = pendingSkill.resolvedParameters.filter { !$0.type.acceptsFiles }
+        guard !valueParameters.isEmpty else { return nil }
+        let remainder = commandRemainder(for: pendingSkill, input: prompt)
+        if remainder.isEmpty { return valueParameters.first?.name }
+        guard prompt.last?.isWhitespace == true else { return nil }
+        let completedCount = splitCommandArguments(remainder).count
+        guard valueParameters.indices.contains(completedCount) else { return nil }
+        return valueParameters[completedCount].name
+    }
+
+    private var parameterGuidanceDetail: String {
+        if let fileParameter = nextUnfilledFileParameter {
+            return "从上方回形针选择，或把\(fileParameter.type.displayName)拖入上方输入框"
+        }
+        if let nextInlineParameterHint {
+            return "继续在上方输入“\(nextInlineParameterHint)”"
+        }
+        return missingRequiredParameters.isEmpty ? "按回车立即执行" : "还需：\(missingRequiredParameters.joined(separator: "、"))"
     }
 
     private var recommendedSkills: [FeatureItem] {
@@ -641,38 +622,183 @@ struct AssistantPanelView: View {
         return visibleSuggestionTargets[min(selectedSuggestionIndex, visibleSuggestionTargets.count - 1)]
     }
 
-    private var completionSuffix: String? {
-        guard let selectedSuggestion else { return nil }
-        let query = trimmedPrompt
+    private var inlineCompletion: PanelInlineCompletion? {
+        if pendingSkill != nil, let nextInlineParameterHint {
+            return PanelInlineCompletion(commandSuffix: "", parameterHint: nextInlineParameterHint)
+        }
+
+        if let tabCompletion, tabCompletion.sourcePrompt == prompt {
+            let suffix = commandSuffix(command: tabCompletion.command, query: tabCompletion.sourcePrompt) ?? ""
+            return PanelInlineCompletion(
+                commandSuffix: suffix,
+                parameterHint: tabCompletion.parameterHint
+            )
+        }
+
+        guard let selectedSuggestion,
+              let command = preferredCommand(for: selectedSuggestion, query: trimmedPrompt),
+              normalized(command) != normalized(trimmedPrompt),
+              let suffix = commandSuffix(command: command, query: trimmedPrompt) else {
+            return nil
+        }
+        return PanelInlineCompletion(commandSuffix: suffix, parameterHint: nil)
+    }
+
+    private func preferredCommand(
+        for suggestion: PanelSuggestionTarget,
+        query: String
+    ) -> String? {
         guard !query.isEmpty, !query.contains(where: \.isWhitespace) else { return nil }
 
         let terms: [String]
-        switch selectedSuggestion {
+        switch suggestion {
         case .userSkill(let skill):
-            terms = [skill.name] + skill.aliases
+            terms = [skill.registeredKeyword].compactMap { $0 } + skill.aliases + [skill.name]
         case .builtIn(let skill):
             terms = [skill.commandName, skill.id] + skill.searchTerms
         }
 
         let normalizedQuery = normalized(query)
-        guard let completion = terms
-            .filter({ normalized($0).hasPrefix(normalizedQuery) && normalized($0) != normalizedQuery })
+        return terms
+            .filter({ normalized($0).hasPrefix(normalizedQuery) })
             .sorted(by: { $0.count < $1.count })
-            .first,
-              completion.count >= query.count else {
-            return nil
-        }
+            .first
+    }
 
-        let suffixStart = completion.index(completion.startIndex, offsetBy: query.count)
-        return String(completion[suffixStart...])
+    private func commandSuffix(command: String, query: String) -> String? {
+        guard command.count >= query.count else { return nil }
+        let suffixStart = command.index(command.startIndex, offsetBy: query.count)
+        return String(command[suffixStart...])
     }
 
     @discardableResult
     private func cycleSuggestion(by offset: Int) -> Bool {
         let count = visibleSuggestionTargets.count
         guard isPredicting, count > 0 else { return false }
+        tabCompletion = nil
         selectedSuggestionIndex = (selectedSuggestionIndex + offset + count) % count
         return true
+    }
+
+    @discardableResult
+    private func selectNextSuggestionWithTab() -> Bool {
+        guard cycleSuggestion(by: 1),
+              let selectedSuggestion,
+              let command = preferredCommand(for: selectedSuggestion, query: trimmedPrompt) else {
+            return false
+        }
+
+        let parameterHint: String?
+        switch selectedSuggestion {
+        case .userSkill(let skill):
+            parameterHint = skill.resolvedParameters.first?.name
+        case .builtIn(let skill):
+            let parts = skill.executionExample.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            parameterHint = parts.count > 1 ? String(parts[1]) : nil
+        }
+
+        tabCompletion = PanelTabCompletion(
+            sourcePrompt: prompt,
+            command: command,
+            parameterHint: parameterHint,
+            target: selectedSuggestion
+        )
+        AppConsole.shared.info(
+            "Tab 已预选命令：\(command)；下一参数=\(parameterHint ?? "无")",
+            category: "Assistant"
+        )
+        return true
+    }
+
+    private func handlePromptChange(from oldValue: String, to newValue: String) {
+        defer { selectedSuggestionIndex = 0 }
+
+        if let pendingSkill {
+            tabCompletion = nil
+            guard commandMatches(skill: pendingSkill, input: newValue) else {
+                cancelParameterEntry(clearPrompt: false)
+                return
+            }
+            refreshInlineArguments(for: pendingSkill, input: newValue)
+            return
+        }
+
+        if let tabCompletion,
+           oldValue == tabCompletion.sourcePrompt,
+           newValue.hasPrefix(oldValue),
+           newValue.count > oldValue.count {
+            let enteredStart = newValue.index(newValue.startIndex, offsetBy: oldValue.count)
+            let enteredText = String(newValue[enteredStart...].drop(while: \.isWhitespace))
+            acceptCommand(tabCompletion.target, command: tabCompletion.command, enteredText: enteredText)
+            return
+        }
+
+        tabCompletion = nil
+        let oldQuery = oldValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !oldQuery.isEmpty,
+              !oldQuery.contains(where: \.isWhitespace),
+              newValue.hasPrefix(oldValue),
+              newValue.count > oldValue.count else {
+            return
+        }
+        let appendedStart = newValue.index(newValue.startIndex, offsetBy: oldValue.count)
+        let appended = newValue[appendedStart...]
+        guard appended.allSatisfy(\.isWhitespace),
+              let suggestion = suggestionTarget(for: oldQuery, index: selectedSuggestionIndex),
+              let command = preferredCommand(for: suggestion, query: oldQuery) else {
+            return
+        }
+        acceptCommand(suggestion, command: command, enteredText: "")
+    }
+
+    private func suggestionTarget(for query: String, index: Int) -> PanelSuggestionTarget? {
+        let userSkills = Array(predictedUserSkills(for: query).prefix(3))
+        let builtIns = Array(predictedSkills(for: query).prefix(max(0, 4 - userSkills.count)))
+        let targets = userSkills.map(PanelSuggestionTarget.userSkill)
+            + builtIns.map(PanelSuggestionTarget.builtIn)
+        guard !targets.isEmpty else { return nil }
+        return targets[min(index, targets.count - 1)]
+    }
+
+    private func acceptCommand(
+        _ target: PanelSuggestionTarget,
+        command: String,
+        enteredText: String
+    ) {
+        tabCompletion = nil
+        let rewrittenInput = command + " " + enteredText
+        AppConsole.shared.info(
+            "已锁定命令：\(command)；后续内容在顶部输入线作为参数接收",
+            category: "Assistant"
+        )
+        switch target {
+        case .userSkill(let skill):
+            if skill.resolvedParameters.isEmpty {
+                prompt = command
+            } else {
+                beginParameterEntry(for: skill, input: rewrittenInput)
+                prompt = rewrittenInput
+            }
+        case .builtIn:
+            prompt = rewrittenInput
+        }
+        searchIsFocused = true
+    }
+
+    private func commandMatches(skill: UserSkill, input: String) -> Bool {
+        guard let command = input
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .first
+            .map(String.init) else {
+            return false
+        }
+        return commandTerms(for: skill).contains { normalized($0) == normalized(command) }
+    }
+
+    private func refreshInlineArguments(for skill: UserSkill, input: String) {
+        parameterValues = [:]
+        applyInlineArguments(commandRemainder(for: skill, input: input), to: skill.resolvedParameters)
     }
 
     private func predictedSkills(for rawQuery: String) -> [FeatureItem] {
@@ -787,26 +913,27 @@ struct AssistantPanelView: View {
             submit(skill, input: input, values: [:], files: [:])
             return
         }
+        let hasInlineArguments = !commandRemainder(for: skill, input: input).isEmpty
         beginParameterEntry(for: skill, input: input)
+        if hasInlineArguments, missingRequiredParameters.isEmpty {
+            AppConsole.shared.info(
+                "技能“\(skill.name)”已从命令行收齐参数，跳过二次确认",
+                category: "Assistant"
+            )
+            executePendingSkill()
+        }
     }
 
     private func beginParameterEntry(for skill: UserSkill, input: String) {
         pendingSkill = skill
         response = nil
-        parameterValues = [:]
         parameterFiles = [:]
-
-        for parameter in skill.resolvedParameters where parameter.type == .boolean {
-            parameterValues[parameter.id] = "false"
-        }
-
-        let inlineInput = commandRemainder(for: skill, input: input)
-        applyInlineArguments(inlineInput, to: skill.resolvedParameters)
+        refreshInlineArguments(for: skill, input: input)
         let acceptsFiles = skill.resolvedParameters.contains(where: { $0.type.acceptsFiles })
         PanelController.shared.setInteractionPinned(acceptsFiles)
-        searchIsFocused = !acceptsFiles
+        searchIsFocused = true
         AppConsole.shared.info(
-            "技能“\(skill.name)”进入参数收集；参数数=\(skill.resolvedParameters.count)，文件参数=\(acceptsFiles ? "是" : "否")",
+            "技能“\(skill.name)”进入单行参数输入；参数数=\(skill.resolvedParameters.count)，文件参数=\(acceptsFiles ? "是" : "否")",
             category: "Assistant"
         )
     }
@@ -822,26 +949,33 @@ struct AssistantPanelView: View {
 
     private func cancelParameterEntry(clearPrompt: Bool) {
         pendingSkill = nil
+        tabCompletion = nil
         parameterValues = [:]
         parameterFiles = [:]
-        isDropTargeted = false
         PanelController.shared.setInteractionPinned(false)
         if clearPrompt { prompt = "" }
     }
 
     private func commandRemainder(for skill: UserSkill, input: String) -> String {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        let terms = ([skill.name] + skill.aliases).sorted { $0.count > $1.count }
+        let terms = commandTerms(for: skill).sorted { $0.count > $1.count }
         guard let term = terms.first(where: { candidate in
-            normalized(trimmed).hasPrefix(normalized(candidate))
+            let normalizedInput = normalized(trimmed)
+            let normalizedCandidate = normalized(candidate)
+            return normalizedInput == normalizedCandidate
+                || normalizedInput.hasPrefix(normalizedCandidate + " ")
         }) else { return "" }
         let index = trimmed.index(trimmed.startIndex, offsetBy: min(term.count, trimmed.count))
         return String(trimmed[index...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func commandTerms(for skill: UserSkill) -> [String] {
+        [skill.registeredKeyword].compactMap { $0 } + skill.aliases + [skill.name]
+    }
+
     private func applyInlineArguments(_ rawValue: String, to parameters: [SkillParameterDefinition]) {
         guard !rawValue.isEmpty else { return }
-        let valueParameters = parameters.filter { !$0.type.acceptsFiles && $0.type != .boolean }
+        let valueParameters = parameters.filter { !$0.type.acceptsFiles }
         let fileParameters = parameters.filter(\.type.acceptsFiles)
 
         if valueParameters.count == 1, let parameter = valueParameters.first {
@@ -1211,6 +1345,36 @@ struct AssistantPanelView: View {
 private enum PanelSuggestionTarget {
     case userSkill(UserSkill)
     case builtIn(FeatureItem)
+}
+
+private struct PanelTabCompletion {
+    let sourcePrompt: String
+    let command: String
+    let parameterHint: String?
+    let target: PanelSuggestionTarget
+}
+
+private struct PanelInlineCompletion {
+    let commandSuffix: String
+    let parameterHint: String?
+}
+
+private struct PanelDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        PanelDragNSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class PanelDragNSView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
 }
 
 private struct SkillSuggestionRow: View {
