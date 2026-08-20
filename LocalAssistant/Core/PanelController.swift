@@ -8,6 +8,7 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private var panel: AssistantPanel?
     private let inputSourceSession = KeyboardInputSourceSession()
+    private var isInteractionPinned = false
 
     func toggle() {
         if panel?.isVisible == true {
@@ -32,6 +33,15 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     func prepareForTermination() {
         inputSourceSession.restore()
+    }
+
+    func setInteractionPinned(_ pinned: Bool) {
+        isInteractionPinned = pinned
+        panel?.hidesOnDeactivate = !pinned
+        AppConsole.shared.info(
+            pinned ? "快捷面板已临时固定，可从 Finder 拖入文件" : "快捷面板已恢复失焦自动隐藏",
+            category: "Panel"
+        )
     }
 
     private func makePanel() -> AssistantPanel {
@@ -63,6 +73,7 @@ final class PanelController: NSObject, NSWindowDelegate {
               window === panel else {
             return
         }
+        guard !isInteractionPinned else { return }
         inputSourceSession.restore()
         window.orderOut(nil)
         AppConsole.shared.info("快捷面板失去焦点并隐藏", category: "Panel")
@@ -137,15 +148,21 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private func makeWindow() -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
         window.title = "Local Assistant 设置"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.toolbarStyle = .unified
+        window.titlebarSeparatorStyle = .automatic
+        window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 660, height: 500)
+        window.minSize = NSSize(width: 680, height: 520)
+        window.setFrameAutosaveName("LocalAssistant.SettingsWindow")
         window.delegate = self
         window.contentView = NSHostingView(rootView: SettingsView())
         return window

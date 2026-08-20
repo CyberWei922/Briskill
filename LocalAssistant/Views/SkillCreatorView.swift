@@ -8,10 +8,11 @@ struct SkillCreatorView: View {
     @State private var executionMode: SkillExecutionMode = .localOnly
     @AppStorage("skillCreator.deepThinkingEnabled") private var deepThinkingEnabled = true
     @State private var mode: SkillCreationMode = .guided
-    @State private var whenText = ""
-    @State private var conditionText = ""
-    @State private var actionText = ""
-    @State private var otherwiseText = ""
+    @State private var guidedStep = 0
+    @State private var skillName = ""
+    @State private var keyword = ""
+    @State private var parameters: [SkillParameterDefinition] = []
+    @State private var processText = ""
     @State private var outputText = "在助手面板显示，并复制到剪贴板"
     @State private var freeformText = ""
     @State private var draft: SkillDraft?
@@ -85,22 +86,13 @@ struct SkillCreatorView: View {
 
             Group {
                 if mode == .guided {
-                    ViewThatFits(in: .vertical) {
-                        guidedForm
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 16)
-
-                        ScrollView {
-                            guidedForm
-                                .padding(.horizontal, 24)
-                                .padding(.vertical, 16)
-                        }
-                        .scrollIndicators(.automatic)
-                    }
+                    guidedForm
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 14)
                 } else {
                     freeformEditor
-                        .padding(24)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 14)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
@@ -131,7 +123,7 @@ struct SkillCreatorView: View {
                     .disabled(isGenerating)
 
                 Button {
-                    generate()
+                    performPrimaryAction()
                 } label: {
                     if isGenerating {
                         ProgressView()
@@ -140,7 +132,7 @@ struct SkillCreatorView: View {
                             .frame(width: 76, height: 30)
                             .background(Color.indigo, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     } else {
-                        Text("生成草稿")
+                        Text(primaryActionTitle)
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(Color.white)
                             .padding(.horizontal, 14)
@@ -152,7 +144,7 @@ struct SkillCreatorView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(!canGenerate || isGenerating)
+                .disabled(!canPerformPrimaryAction || isGenerating)
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
@@ -160,44 +152,50 @@ struct SkillCreatorView: View {
     }
 
     private var guidedForm: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            PromptField(
-                keyword: "当",
-                english: "WHEN",
-                prompt: "什么时候运行？例如：我输入“会议收尾”时",
-                text: $whenText
-            )
-            PromptField(
-                keyword: "如果",
-                english: "IF",
-                prompt: "可选条件，例如：选中了文字",
-                text: $conditionText,
-                optional: true
-            )
-            PromptField(
-                keyword: "就",
-                english: "THEN",
-                prompt: "要完成什么？例如：提取待办并按优先级排序",
-                text: $actionText
-            )
-            PromptField(
-                keyword: "否则",
-                english: "ELSE",
-                prompt: "条件不满足时怎么办？",
-                text: $otherwiseText,
-                optional: true
-            )
-            PromptField(
-                keyword: "反馈",
-                english: "OUTPUT",
-                prompt: "结果如何交给你？",
-                text: $outputText
-            )
+        VStack(alignment: .leading, spacing: 18) {
+            GuidedStepHeader(currentStep: guidedStep) { step in
+                guard step <= guidedStep || (step == guidedStep + 1 && guidedStepCanAdvance) else { return }
+                guidedStep = step
+            }
+
+            Group {
+                switch guidedStep {
+                case 0:
+                    GuidedIdentityStep(skillName: $skillName, keyword: $keyword)
+                case 1:
+                    ScrollView {
+                        ParameterEditor(parameters: $parameters)
+                    }
+                    .scrollIndicators(parameters.count > 2 ? .automatic : .hidden)
+                case 2:
+                    LongTextEntry(
+                        title: "处理过程",
+                        placeholder: "说明拿到参数后要依次做什么。例如：识别图片中的文字，保留段落结构，再清理明显的识别错误。",
+                        text: $processText
+                    )
+                default:
+                    LongTextEntry(
+                        title: "输出形式和内容",
+                        placeholder: "例如：在面板显示识别结果，并提供复制按钮。",
+                        text: $outputText
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            if guidedStep > 0 {
+                Button("上一步") {
+                    guidedStep -= 1
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
         }
     }
 
     private var freeformEditor: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("描述你的需求")
                 .font(.system(size: 13, weight: .semibold))
 
@@ -206,7 +204,7 @@ struct SkillCreatorView: View {
                 .scrollContentBackground(.hidden)
                 .scrollIndicators(.automatic)
                 .padding(12)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, minHeight: 110, idealHeight: 130, maxHeight: 150)
                 .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(alignment: .topLeading) {
                     if freeformText.isEmpty {
@@ -217,6 +215,25 @@ struct SkillCreatorView: View {
                             .allowsHitTesting(false)
                     }
                 }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("调用格式")
+                    .font(.system(size: 13, weight: .semibold))
+
+                TextField("注册关键词，例如 ocr", text: $keyword)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .frame(height: 38)
+                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+
+                ScrollView {
+                    ParameterEditor(parameters: $parameters, compact: true)
+                }
+                .scrollIndicators(parameters.count > 2 ? .automatic : .hidden)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -283,10 +300,10 @@ struct SkillCreatorView: View {
         SkillCreationRequest(
             executionMode: executionMode,
             mode: mode,
-            whenText: whenText,
-            conditionText: conditionText,
-            actionText: actionText,
-            otherwiseText: otherwiseText,
+            skillName: skillName,
+            keyword: keyword,
+            parameters: parameters,
+            processText: processText,
             outputText: outputText,
             freeformText: freeformText
         )
@@ -294,9 +311,45 @@ struct SkillCreatorView: View {
 
     private var canGenerate: Bool {
         switch mode {
-        case .guided: !actionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .freeform: freeformText.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8
+        case .guided:
+            guidedStep == 3 && guidedStepCanAdvance
+        case .freeform:
+            !keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && freeformText.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8
         }
+    }
+
+    private var guidedStepCanAdvance: Bool {
+        switch guidedStep {
+        case 0:
+            return !skillName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case 1:
+            return parameters.allSatisfy { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        case 2:
+            return !processText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        default:
+            return !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private var canPerformPrimaryAction: Bool {
+        mode == .guided && guidedStep < 3 ? guidedStepCanAdvance : canGenerate
+    }
+
+    private var primaryActionTitle: String {
+        mode == .guided && guidedStep < 3 ? "下一步" : "生成草稿"
+    }
+
+    private func performPrimaryAction() {
+        if mode == .guided && guidedStep < 3 {
+            guard guidedStepCanAdvance else { return }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                guidedStep += 1
+            }
+            return
+        }
+        generate()
     }
 
     private var isGenerating: Bool {
@@ -304,7 +357,10 @@ struct SkillCreatorView: View {
     }
 
     private var inputFingerprint: String {
-        [settings.selectedProvider.rawValue, executionMode.rawValue, String(deepThinkingEnabled), mode.rawValue, whenText, conditionText, actionText, otherwiseText, outputText, freeformText]
+        let parameterFingerprint = parameters.map {
+            [$0.id, $0.name, $0.type.rawValue, String($0.required), $0.description].joined(separator: "|")
+        }.joined(separator: "~")
+        return [settings.selectedProvider.rawValue, executionMode.rawValue, String(deepThinkingEnabled), mode.rawValue, skillName, keyword, parameterFingerprint, processText, outputText, freeformText]
             .joined(separator: "\u{1F}")
     }
 
@@ -372,10 +428,11 @@ struct SkillCreatorView: View {
                     guard !streamedOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                         throw AIServiceError.emptyResponse("流式响应结束，但 content 为空；finish_reason=\(finishReason ?? "未知")")
                     }
-                    let parsedDraft = try SkillGenerationService.shared.decodeDraft(
+                    var parsedDraft = try SkillGenerationService.shared.decodeDraft(
                         from: streamedOutput,
                         expectedExecutionMode: currentRequest.executionMode
                     )
+                    parsedDraft.parameters = currentRequest.parameters
                     generationEndedAt = Date()
                     draft = parsedDraft
                     generatedInputFingerprint = inputFingerprint
@@ -439,10 +496,11 @@ struct SkillCreatorView: View {
         generationTask = nil
         executionMode = .localOnly
         mode = .guided
-        whenText = ""
-        conditionText = ""
-        actionText = ""
-        otherwiseText = ""
+        guidedStep = 0
+        skillName = ""
+        keyword = ""
+        parameters = []
+        processText = ""
         outputText = "在助手面板显示，并复制到剪贴板"
         freeformText = ""
         clearGenerationState()
@@ -611,11 +669,12 @@ private struct GenerationProgressView: View {
                                 .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(.secondary)
 
-                            Text(reasoningDisplayText)
-                                .font(.system(size: 12.5))
-                                .lineSpacing(4)
-                                .foregroundStyle(reasoning.isEmpty ? .tertiary : .primary)
-                                .textSelection(.enabled)
+                            MarkdownContentView(
+                                markdown: reasoningDisplayText,
+                                baseFontSize: 12.5,
+                                textColor: reasoning.isEmpty ? Color.secondary.opacity(0.55) : .primary,
+                                blockSpacing: 8
+                            )
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .padding(14)
@@ -626,10 +685,11 @@ private struct GenerationProgressView: View {
                                 Label("正在组织技能定义", systemImage: "curlybraces")
                                     .font(.system(size: 11.5, weight: .semibold))
                                     .foregroundStyle(.secondary)
-                                Text(streamedOutput)
-                                    .font(.system(size: 10.5, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
+                                MarkdownCodeBlockView(
+                                    code: streamedOutput,
+                                    language: "json",
+                                    fontSize: 10.5
+                                )
                             }
                             .padding(14)
                             .background(Color.indigo.opacity(0.055), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -889,6 +949,190 @@ private struct ExecutionModePicker: View {
     }
 }
 
+private struct GuidedStepHeader: View {
+    let currentStep: Int
+    let select: (Int) -> Void
+
+    private let titles = ["名称", "参数", "处理", "输出"]
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ForEach(titles.indices, id: \.self) { index in
+                Button {
+                    select(index)
+                } label: {
+                    HStack(spacing: 5) {
+                        Text("\(index + 1)")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .frame(width: 18, height: 18)
+                            .background(index == currentStep ? Color.white.opacity(0.18) : Color.primary.opacity(0.07), in: Circle())
+                        Text(titles[index])
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    .foregroundStyle(index == currentStep ? Color.white : (index < currentStep ? Color.indigo : Color.secondary))
+                    .frame(maxWidth: .infinity, minHeight: 34)
+                    .background(index == currentStep ? Color.indigo : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+private struct GuidedIdentityStep: View {
+    @Binding var skillName: String
+    @Binding var keyword: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("功能名称")
+                    .font(.system(size: 13, weight: .semibold))
+                TextField("例如：图片文字识别", text: $skillName)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 13)
+                    .frame(height: 42)
+                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("注册关键词")
+                    .font(.system(size: 13, weight: .semibold))
+                TextField("例如：ocr", text: $keyword)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 13)
+                    .frame(height: 42)
+                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                Text("以后在快捷面板输入这个关键词即可调用技能。")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
+private struct ParameterEditor: View {
+    @Binding var parameters: [SkillParameterDefinition]
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(compact ? "传入参数" : "运行时需要传入什么？")
+                        .font(.system(size: 13, weight: .semibold))
+                    if !compact {
+                        Text(parameters.isEmpty ? "没有参数时，输入关键词就会立即执行。" : "文本可直接跟在关键词后；文件和图片可拖入、粘贴或选择。")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer()
+                Button {
+                    parameters.append(.blank(index: parameters.count + 1))
+                } label: {
+                    Label("添加参数", systemImage: "plus")
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if parameters.isEmpty {
+                HStack(spacing: 9) {
+                    Image(systemName: "nosign")
+                    Text("当前技能不接收参数")
+                }
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: compact ? 44 : 62)
+                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                VStack(spacing: 8) {
+                    ForEach($parameters) { $parameter in
+                        ParameterDefinitionRow(parameter: $parameter) {
+                            parameters.removeAll { $0.id == parameter.id }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ParameterDefinitionRow: View {
+    @Binding var parameter: SkillParameterDefinition
+    let remove: () -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("参数名称", text: $parameter.name)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 10)
+                    .frame(height: 34)
+                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                Picker("类型", selection: $parameter.type) {
+                    ForEach(SkillParameterType.allCases) { type in
+                        Label(type.displayName, systemImage: type.symbol).tag(type)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 104)
+
+                Toggle("必填", isOn: $parameter.required)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 10.5))
+
+                Button(action: remove) {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("删除参数")
+            }
+
+            TextField("用途或格式说明（可选）", text: $parameter.description)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct LongTextEntry: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+            TextEditor(text: $text)
+                .font(.system(size: 13.5))
+                .scrollContentBackground(.hidden)
+                .padding(10)
+                .frame(maxWidth: .infinity, minHeight: 160, maxHeight: 230)
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text(placeholder)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.tertiary)
+                            .padding(16)
+                            .allowsHitTesting(false)
+                    }
+                }
+        }
+    }
+}
+
 private struct PromptField: View {
     let keyword: String
     let english: String
@@ -962,15 +1206,43 @@ private struct SkillDraftPreview: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text(draft.summary)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(.secondary)
+                    MarkdownContentView(
+                        markdown: draft.summary,
+                        baseFontSize: 13.5,
+                        textColor: .secondary,
+                        blockSpacing: 8
+                    )
 
                     PreviewSection(title: "运行方式", symbol: "play.circle") {
                         Text(draft.trigger)
                         if let condition = draft.condition {
                             Label(condition, systemImage: "arrow.triangle.branch")
                                 .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if !draft.resolvedParameters.isEmpty {
+                        PreviewSection(title: "传入参数", symbol: "curlybraces") {
+                            ForEach(draft.resolvedParameters) { parameter in
+                                HStack(spacing: 8) {
+                                    Image(systemName: parameter.type.symbol)
+                                        .foregroundStyle(.indigo)
+                                        .frame(width: 18)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(parameter.name)
+                                            .font(.system(size: 11.5, weight: .semibold))
+                                        if !parameter.description.isEmpty {
+                                            Text(parameter.description)
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Text("\(parameter.type.displayName) · \(parameter.required ? "必填" : "可选")")
+                                        .font(.system(size: 9.5))
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
                         }
                     }
 
@@ -998,7 +1270,7 @@ private struct SkillDraftPreview: View {
                                         Text(step.tool)
                                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
                                         if !step.arguments.isEmpty {
-                                            Text(step.arguments.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " · "))
+                                            Text(step.arguments.map { "\($0.key)=\($0.value.displayText)" }.sorted().joined(separator: " · "))
                                                 .font(.system(size: 9.5, design: .monospaced))
                                                 .foregroundStyle(.secondary)
                                         }
@@ -1010,10 +1282,11 @@ private struct SkillDraftPreview: View {
 
                     if let modelTask = draft.modelTask {
                         PreviewSection(title: "运行时 AI 提示词", symbol: "cloud") {
-                            Text(modelTask.promptTemplate)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
+                            MarkdownCodeBlockView(
+                                code: modelTask.promptTemplate,
+                                language: "prompt",
+                                fontSize: 11
+                            )
                             Text("模型策略：\(modelTask.providerPolicy)")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.tertiary)
@@ -1043,8 +1316,12 @@ private struct SkillDraftPreview: View {
                     }
 
                     PreviewSection(title: "AI 的解释", symbol: "text.bubble") {
-                        Text(draft.explanation)
-                            .foregroundStyle(.secondary)
+                        MarkdownContentView(
+                            markdown: draft.explanation,
+                            baseFontSize: 12.5,
+                            textColor: .secondary,
+                            blockSpacing: 8
+                        )
                     }
 
                     if let message {

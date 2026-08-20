@@ -32,6 +32,7 @@
 		100000000000000000000023 /* ConsoleWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000024 /* ConsoleWindowController.swift */; };
 		100000000000000000000024 /* ConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000025 /* ConsoleView.swift */; };
 		100000000000000000000025 /* GenerationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000026 /* GenerationHistoryView.swift */; };
+		100000000000000000000026 /* MarkdownContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000027 /* MarkdownContentView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -61,6 +62,7 @@
 		200000000000000000000024 /* ConsoleWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleWindowController.swift; sourceTree = "<group>"; };
 		200000000000000000000025 /* ConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleView.swift; sourceTree = "<group>"; };
 		200000000000000000000026 /* GenerationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationHistoryView.swift; sourceTree = "<group>"; };
+		200000000000000000000027 /* MarkdownContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownContentView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -142,6 +144,7 @@
 				200000000000000000000019 /* SkillCreatorView.swift */,
 				200000000000000000000025 /* ConsoleView.swift */,
 				200000000000000000000026 /* GenerationHistoryView.swift */,
+				200000000000000000000027 /* MarkdownContentView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -247,6 +250,7 @@
 				100000000000000000000023 /* ConsoleWindowController.swift in Sources */,
 				100000000000000000000024 /* ConsoleView.swift in Sources */,
 				100000000000000000000025 /* GenerationHistoryView.swift in Sources */,
+				100000000000000000000026 /* MarkdownContentView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

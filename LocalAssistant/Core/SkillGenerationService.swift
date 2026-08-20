@@ -107,12 +107,44 @@ final class SkillGenerationService {
                 try validate(draft, expectedExecutionMode: expectedExecutionMode)
             }
             return draft
+        } catch let error as SkillGenerationError {
+            throw error
         } catch {
             throw SkillGenerationError.invalidJSON(
-                details: error.localizedDescription,
+                details: Self.decodingDetails(for: error),
                 responsePreview: String(cleaned.prefix(800))
             )
         }
+    }
+
+    private static func decodingDetails(for error: Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+
+        let context: DecodingError.Context
+        let headline: String
+        switch decodingError {
+        case .typeMismatch(let type, let valueContext):
+            context = valueContext
+            headline = "字段类型不匹配，程序期望 \(type)"
+        case .valueNotFound(let type, let valueContext):
+            context = valueContext
+            headline = "字段值缺失，程序期望 \(type)"
+        case .keyNotFound(let key, let valueContext):
+            context = valueContext
+            headline = "缺少必填字段 \(key.stringValue)"
+        case .dataCorrupted(let valueContext):
+            context = valueContext
+            headline = "JSON 数据损坏或包含不支持的值"
+        @unknown default:
+            return error.localizedDescription
+        }
+
+        let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+        return path.isEmpty
+            ? "\(headline)：\(context.debugDescription)"
+            : "\(headline)；位置：\(path)；原因：\(context.debugDescription)"
     }
 
     private func validate(
@@ -159,11 +191,20 @@ final class SkillGenerationService {
       "requiredTools": ["按实际调用顺序去重后的工具 ID"],
       "permissions": ["实际需要的 macOS 权限或 cloud_api"],
       "executionMode": "localOnly 或 cloudAssisted",
+      "parameters": [
+        {
+          "id": "稳定且唯一的参数 ID",
+          "name": "参数显示名称",
+          "type": "text、file、image、folder、number 或 boolean",
+          "required": true,
+          "description": "用户应该传入什么"
+        }
+      ],
       "workflow": [
         {
           "id": "step_1",
           "tool": "工具 ID",
-          "arguments": {"参数名": "常量、{{userInput}} 或 $前一步输出"},
+          "arguments": {"工具参数名": "常量、{{参数名称}}、{{userInput}} 或 $前一步输出"},
           "saveAs": "可选输出变量名"
         }
       ],
@@ -176,7 +217,12 @@ final class SkillGenerationService {
     - workflow 只能引用下面对应模式列出的工具，不得编造已经可用的系统能力。
     - 如果用户需要但注册表没有工具，在 requiredTools 写 missing:能力，并在 explanation 清楚说明。
     - 不要声称已经执行任务，不生成或执行 Shell、AppleScript、Swift、Python、JavaScript 等任意代码。
-    - arguments 中的运行时值使用 {{userInput}} 或 $变量引用，不把用户示例数据写死。
+    - workflow.arguments 必须始终是 JSON 对象。对象中的值可以是字符串、数字、布尔值、数组、嵌套对象或 null，但必须符合对应工具的真实参数结构。
+    - arguments 中的运行时值使用 {{参数名称}}、{{userInput}} 或 $变量引用，不把用户示例数据写死。
+    - model.generateText 步骤的 arguments 只传运行时输入，例如 {"input":"{{英文单词}}"}。严禁在 arguments 中放入 promptTemplate、inputVariables 或 providerPolicy；这三个字段只属于顶层 modelTask。
+    - 不要把声明字段重复嵌套到 arguments。生成前自行检查 workflow 每个步骤只含 id、tool、arguments、saveAs 四个字段。
+    - parameters 必须原样保留用户定义的参数数量、名称、类型与必填状态，不得把文件或图片降级成普通文本。
+    - workflow 和 modelTask 通过 {{参数名称}} 引用对应运行时参数；仅在确实需要整条原始输入时使用 {{userInput}}。
     - 文件操作只能使用用户授权路径；修改、移动、发送等操作必须在 permissions 中声明确认要求。
     - 网络访问不等于云端大模型调用。经过授权的本地网络工具可以联网，但必须声明具体目标和用途。
     - actions 是给用户阅读的自然语言步骤；workflow 是给执行器读取的结构化步骤，两者必须一致。
@@ -218,6 +264,8 @@ final class SkillGenerationService {
               {"tool":"model.generateText","promptTemplate":"运行时提示词模板，变量使用 {{变量名}}","inputVariables":["变量名"],"providerPolicy":"userDefault"}
             - modelTask.promptTemplate 是以后每次运行技能时使用的提示词，不是本次创建时的回答。
             - workflow 中通过 model.generateText 引用 modelTask；模型前后都可以组合本地工具。
+            - model.generateText 的 workflow 示例：{"id":"step_1","tool":"model.generateText","arguments":{"input":"{{英文单词}}"},"saveAs":"modelResult"}。
+            - inputVariables 只能出现在 modelTask 中，并且必须列出 promptTemplate 实际引用的运行时变量名。
             - requiredTools 必须包含 model.generateText，permissions 必须包含 cloud_api。
             - dataDisclosure 必须逐项说明哪些变量会发送给云端模型；不得用“必要数据”等模糊描述。
             - 不绑定 DeepSeek、GLM、Gemini 或 OpenAI，运行时使用用户默认服务商。
@@ -235,7 +283,7 @@ enum SkillGenerationError: LocalizedError {
         switch self {
         case .invalidOutput: "模型没有返回可识别的技能定义"
         case .invalidJSON(let details, let responsePreview):
-            "模型两次返回的技能格式都无法读取。\n解析错误：\(details)\n\n模型返回内容（前 800 字）：\n\(responsePreview)"
+            "模型返回的技能格式无法读取。\n解析错误：\(details)\n\n模型返回内容（前 800 字）：\n\(responsePreview)"
         case .modeViolation(let details):
             "模型生成的技能违反了运行模式约束：\(details)"
         }

@@ -18,6 +18,19 @@ struct FeatureItem: Identifiable, Hashable {
         }
     }
 
+    var executionExample: String {
+        switch id {
+        case "ocr": "ocr 图片"
+        case "summarize": "summarize 文本"
+        case "files": "find 文件名"
+        case "rewrite": "rewrite 文本"
+        case "translate": "translate 文本"
+        case "clipboard": "clipboard 关键词"
+        case "diagnose": "diagnose 问题"
+        default: commandName
+        }
+    }
+
     var searchTerms: [String] {
         let aliases: [String]
 

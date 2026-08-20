@@ -137,9 +137,12 @@ private struct GenerationRecordDetail: View {
                 }
 
                 HistorySection(title: "生成过程") {
-                    Text(record.reasoning.isEmpty ? "没有返回思考过程。" : record.reasoning)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    MarkdownContentView(
+                        markdown: record.reasoning.isEmpty ? "没有返回思考过程。" : record.reasoning,
+                        baseFontSize: 12,
+                        textColor: .secondary,
+                        blockSpacing: 8
+                    )
                 }
 
                 if let draft = record.draft {
@@ -151,9 +154,11 @@ private struct GenerationRecordDetail: View {
                     }
                 } else if !record.rawOutput.isEmpty {
                     HistorySection(title: "未解析的输出") {
-                        Text(record.rawOutput)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .textSelection(.enabled)
+                        MarkdownCodeBlockView(
+                            code: record.rawOutput,
+                            language: "json",
+                            fontSize: 10.5
+                        )
                     }
                 }
 

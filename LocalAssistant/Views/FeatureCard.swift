@@ -25,8 +25,8 @@ struct FeatureCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(feature.title)
                         .font(.system(size: 15, weight: .semibold))
-                    Text(feature.subtitle)
-                        .font(.caption)
+                    Text(feature.executionExample)
+                        .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -49,4 +49,3 @@ struct FeatureCard: View {
         .buttonStyle(.plain)
     }
 }
-
