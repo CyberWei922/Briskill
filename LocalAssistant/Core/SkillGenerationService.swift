@@ -19,13 +19,13 @@ final class SkillGenerationService {
         }
 
         let provider = settings.selectedProvider
-        let text = try await requestDraftText(
-            description: request.naturalLanguageDescription,
-            provider: provider
-        )
+        let text = try await requestDraftText(request: request, provider: provider)
 
         do {
-            return (try decodeDraft(from: text), provider.displayName)
+            return (
+                try decodeDraft(from: text, expectedExecutionMode: request.executionMode),
+                provider.displayName
+            )
         } catch {
             logger.warning("第一次技能 JSON 解析失败，正在请求模型修复：\(error.localizedDescription, privacy: .public)")
             let repairedText = try await AIService.shared.generateText(
@@ -34,14 +34,17 @@ final class SkillGenerationService {
 
                 \(String(text.prefix(4_000)))
                 """,
-                system: Self.systemPrompt,
+                system: Self.systemPrompt(for: request.executionMode),
                 provider: provider,
                 maxTokens: 1_400,
                 expectsJSON: true
             )
 
             do {
-                return (try decodeDraft(from: repairedText), provider.displayName)
+                return (
+                    try decodeDraft(from: repairedText, expectedExecutionMode: request.executionMode),
+                    provider.displayName
+                )
             } catch {
                 logger.error("第二次技能 JSON 解析仍然失败：\(error.localizedDescription, privacy: .public)")
                 throw SkillGenerationError.invalidJSON(
@@ -52,11 +55,11 @@ final class SkillGenerationService {
         }
     }
 
-    private func requestDraftText(description: String, provider: AIProvider) async throws -> String {
+    private func requestDraftText(request: SkillCreationRequest, provider: AIProvider) async throws -> String {
         do {
             return try await AIService.shared.generateText(
-                prompt: description,
-                system: Self.systemPrompt,
+                prompt: request.generationPrompt,
+                system: Self.systemPrompt(for: request.executionMode),
                 provider: provider,
                 maxTokens: 1_400,
                 expectsJSON: true
@@ -66,11 +69,11 @@ final class SkillGenerationService {
             logger.warning("模型返回空内容，按服务商建议自动重试一次")
             return try await AIService.shared.generateText(
                 prompt: """
-                \(description)
+                \(request.generationPrompt)
 
                 上一次响应为空。这次请直接返回一个非空、完整、可解析的 JSON 对象，不要进行长篇思考。
                 """,
-                system: Self.systemPrompt,
+                system: Self.systemPrompt(for: request.executionMode),
                 provider: provider,
                 maxTokens: 1_800,
                 expectsJSON: true
@@ -78,7 +81,10 @@ final class SkillGenerationService {
         }
     }
 
-    private func decodeDraft(from text: String) throws -> SkillDraft {
+    func decodeDraft(
+        from text: String,
+        expectedExecutionMode: SkillExecutionMode? = nil
+    ) throws -> SkillDraft {
         let cleaned = text
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
@@ -95,7 +101,12 @@ final class SkillGenerationService {
             throw SkillGenerationError.invalidOutput
         }
         do {
-            return try JSONDecoder().decode(SkillDraft.self, from: data)
+            var draft = try JSONDecoder().decode(SkillDraft.self, from: data)
+            if let expectedExecutionMode {
+                draft.executionMode = expectedExecutionMode
+                try validate(draft, expectedExecutionMode: expectedExecutionMode)
+            }
+            return draft
         } catch {
             throw SkillGenerationError.invalidJSON(
                 details: error.localizedDescription,
@@ -104,8 +115,35 @@ final class SkillGenerationService {
         }
     }
 
-    private static let systemPrompt = """
-    你是一个 macOS 个人自动化软件的技能设计器。把用户描述转换成一个受约束、可解释的技能草稿。
+    private func validate(
+        _ draft: SkillDraft,
+        expectedExecutionMode: SkillExecutionMode
+    ) throws {
+        let workflowTools = draft.workflow?.map { $0.tool.lowercased() } ?? []
+        let requiredTools = draft.requiredTools.map { $0.lowercased() }
+
+        switch expectedExecutionMode {
+        case .localOnly:
+            guard draft.modelTask == nil,
+                  !workflowTools.contains(where: { $0.hasPrefix("model.") }),
+                  !requiredTools.contains(where: { $0.hasPrefix("model.") }) else {
+                throw SkillGenerationError.modeViolation("本地技能不能包含云端模型调用")
+            }
+        case .cloudAssisted:
+            guard let modelTask = draft.modelTask,
+                  modelTask.tool == "model.generateText",
+                  !modelTask.promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SkillGenerationError.modeViolation("云端 AI 技能必须提供 model.generateText 提示词模板")
+            }
+        }
+    }
+
+    static func systemPrompt(for executionMode: SkillExecutionMode) -> String {
+        commonPrompt + "\n\n" + modePrompt(for: executionMode)
+    }
+
+    private static let commonPrompt = """
+    你是 macOS 个人自动化软件 Local Assistant 的技能编译器。把用户需求转换成受约束、可解释、可静态检查的声明式技能定义。
 
     只输出 JSON，不要输出 Markdown 或额外说明。JSON 必须严格包含这些字段：
     {
@@ -118,23 +156,88 @@ final class SkillGenerationService {
       "fallback": "否则执行什么；没有则为 null",
       "output": "如何把结果反馈给用户",
       "explanation": "用自然语言解释完整流程和限制",
-      "requiredTools": ["只填写所需能力名称，例如 selected_text、clipboard、ocr、translate、summarize、file_search、notification、model；不确定则写 missing:能力"],
-      "permissions": ["只填写实际需要的 macOS 权限或 cloud_api"]
+      "requiredTools": ["按实际调用顺序去重后的工具 ID"],
+      "permissions": ["实际需要的 macOS 权限或 cloud_api"],
+      "executionMode": "localOnly 或 cloudAssisted",
+      "workflow": [
+        {
+          "id": "step_1",
+          "tool": "工具 ID",
+          "arguments": {"参数名": "常量、{{userInput}} 或 $前一步输出"},
+          "saveAs": "可选输出变量名"
+        }
+      ],
+      "modelTask": null,
+      "networkHosts": ["需要访问的主机名；不需要则为空数组"],
+      "dataDisclosure": ["会离开本机的数据流说明；没有则为空数组"]
     }
 
-    当前产品只保证文本模型调用和本地技能保存。不要声称已经执行任务，不要生成 Shell、AppleScript 或代码。缺少能力时必须用 missing: 标记。
+    通用规则：
+    - workflow 只能引用下面对应模式列出的工具，不得编造已经可用的系统能力。
+    - 如果用户需要但注册表没有工具，在 requiredTools 写 missing:能力，并在 explanation 清楚说明。
+    - 不要声称已经执行任务，不生成或执行 Shell、AppleScript、Swift、Python、JavaScript 等任意代码。
+    - arguments 中的运行时值使用 {{userInput}} 或 $变量引用，不把用户示例数据写死。
+    - 文件操作只能使用用户授权路径；修改、移动、发送等操作必须在 permissions 中声明确认要求。
+    - 网络访问不等于云端大模型调用。经过授权的本地网络工具可以联网，但必须声明具体目标和用途。
+    - actions 是给用户阅读的自然语言步骤；workflow 是给执行器读取的结构化步骤，两者必须一致。
     """
+
+    private static func modePrompt(for executionMode: SkillExecutionMode) -> String {
+        switch executionMode {
+        case .localOnly:
+            return """
+            当前模式：localOnly（本地执行）。
+
+            允许的工具注册表：
+            - clipboard.readText：读取剪贴板纯文本。
+            - clipboard.writeText：写入剪贴板纯文本。
+            - files.list、files.search、files.rename、files.move：只操作用户授权目录。
+            - system.metricsSnapshot、process.topConsumers：读取系统诊断信息。
+            - ocr.recognize：使用本机 Apple Vision 识别图片文字。
+            - network.request：通过本机网络访问用户确认的目标；必须声明协议、主机、用途和请求方法。
+            - notification.show：发送本地通知。
+
+            强制要求：
+            - executionMode 必须为 localOnly。
+            - modelTask 必须为 null。
+            - workflow 和 requiredTools 禁止出现任何 model.* 或 cloud_api。
+            - 本地模式允许使用 network.request；使用时必须把目标写入 networkHosts，并声明网络用途。
+            - network.request 不得上传剪贴板、文件内容或其他私密数据，除非未来存在单独的数据授权机制；当前一律不得设计此类上传。
+            - dataDisclosure 通常为空；如果网络请求会暴露查询参数、主机名等信息，必须如实说明。
+            """
+        case .cloudAssisted:
+            return """
+            当前模式：cloudAssisted（云端 AI 协同）。
+
+            除 localOnly 模式的本地与网络工具外，额外允许：
+            - model.generateText：调用用户配置的统一云端文本模型接口。
+
+            强制要求：
+            - executionMode 必须为 cloudAssisted。
+            - modelTask 必须存在并严格使用以下结构：
+              {"tool":"model.generateText","promptTemplate":"运行时提示词模板，变量使用 {{变量名}}","inputVariables":["变量名"],"providerPolicy":"userDefault"}
+            - modelTask.promptTemplate 是以后每次运行技能时使用的提示词，不是本次创建时的回答。
+            - workflow 中通过 model.generateText 引用 modelTask；模型前后都可以组合本地工具。
+            - requiredTools 必须包含 model.generateText，permissions 必须包含 cloud_api。
+            - dataDisclosure 必须逐项说明哪些变量会发送给云端模型；不得用“必要数据”等模糊描述。
+            - 不绑定 DeepSeek、GLM、Gemini 或 OpenAI，运行时使用用户默认服务商。
+            """
+        }
+    }
 }
 
 enum SkillGenerationError: LocalizedError {
     case invalidOutput
     case invalidJSON(details: String, responsePreview: String)
+    case modeViolation(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidOutput: "模型没有返回可识别的技能定义"
         case .invalidJSON(let details, let responsePreview):
             "模型两次返回的技能格式都无法读取。\n解析错误：\(details)\n\n模型返回内容（前 800 字）：\n\(responsePreview)"
+        case .modeViolation(let details):
+            "模型生成的技能违反了运行模式约束：\(details)"
         }
     }
 }

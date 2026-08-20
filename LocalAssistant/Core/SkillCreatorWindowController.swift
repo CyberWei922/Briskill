@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 final class SkillCreatorWindowController: NSObject, NSWindowDelegate {
     static let shared = SkillCreatorWindowController()
 
@@ -10,9 +11,12 @@ final class SkillCreatorWindowController: NSObject, NSWindowDelegate {
         let window = window ?? makeWindow()
         self.window = window
 
+        DockIconController.shared.retain(for: "skillCreator")
         NSApplication.shared.activate(ignoringOtherApps: true)
+        window.deminiaturize(nil)
         window.center()
         window.makeKeyAndOrderFront(nil)
+        AppConsole.shared.info("技能创建窗口已打开", category: "SkillCreator")
     }
 
     private func makeWindow() -> NSWindow {
@@ -29,5 +33,10 @@ final class SkillCreatorWindowController: NSObject, NSWindowDelegate {
         window.delegate = self
         window.contentView = NSHostingView(rootView: SkillCreatorView())
         return window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        DockIconController.shared.release(for: "skillCreator")
+        AppConsole.shared.info("技能创建窗口已关闭", category: "SkillCreator")
     }
 }

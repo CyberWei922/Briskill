@@ -28,6 +28,12 @@ struct LocalAssistantApp: App {
             }
             .keyboardShortcut(",", modifiers: .command)
 
+            Button {
+                ConsoleWindowController.shared.show()
+            } label: {
+                Label("开发者 Console…", systemImage: "terminal")
+            }
+
             Divider()
 
             Button("退出 Local Assistant") {

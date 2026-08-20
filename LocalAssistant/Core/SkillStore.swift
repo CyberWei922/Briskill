@@ -27,11 +27,13 @@ final class SkillStore: ObservableObject {
             skills.insert(skill, at: 0)
         }
         try persist()
+        AppConsole.shared.success("技能已保存：\(skill.name)（\(skill.id.uuidString)）", category: "SkillStore")
     }
 
     func delete(_ skill: UserSkill) throws {
         skills.removeAll { $0.id == skill.id }
         try persist()
+        AppConsole.shared.warning("技能已删除：\(skill.name)", category: "SkillStore")
     }
 
     private func load() {
@@ -41,8 +43,10 @@ final class SkillStore: ObservableObject {
             let data = try Data(contentsOf: url)
             skills = try decoder.decode([UserSkill].self, from: data)
             lastError = nil
+            AppConsole.shared.info("已加载 \(skills.count) 个本地技能", category: "SkillStore")
         } catch {
             lastError = error.localizedDescription
+            AppConsole.shared.error("本地技能加载失败：\(error.localizedDescription)", category: "SkillStore")
         }
     }
 
@@ -54,6 +58,7 @@ final class SkillStore: ObservableObject {
             lastError = nil
         } catch {
             lastError = error.localizedDescription
+            AppConsole.shared.error("本地技能写入失败：\(error.localizedDescription)", category: "SkillStore")
             throw error
         }
     }

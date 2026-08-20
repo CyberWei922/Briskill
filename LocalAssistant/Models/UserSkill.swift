@@ -7,7 +7,43 @@ enum SkillCreationMode: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum SkillExecutionMode: String, Codable, CaseIterable, Identifiable {
+    case localOnly
+    case cloudAssisted
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .localOnly: "本地执行"
+        case .cloudAssisted: "云端 AI"
+        }
+    }
+
+    var compactDescription: String {
+        switch self {
+        case .localOnly: "不调用云端模型；可使用经授权的本地与网络工具"
+        case .cloudAssisted: "可组合本地工具，并通过统一模型接口生成内容"
+        }
+    }
+}
+
+struct SkillWorkflowStep: Codable, Equatable {
+    var id: String
+    var tool: String
+    var arguments: [String: String]
+    var saveAs: String?
+}
+
+struct SkillModelTask: Codable, Equatable {
+    var tool: String
+    var promptTemplate: String
+    var inputVariables: [String]
+    var providerPolicy: String
+}
+
 struct SkillCreationRequest {
+    var executionMode: SkillExecutionMode
     var mode: SkillCreationMode
     var whenText: String
     var conditionText: String
@@ -32,6 +68,17 @@ struct SkillCreationRequest {
             return freeformText.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
+
+    var generationPrompt: String {
+        """
+        <skill_request>
+        execution_mode: \(executionMode.rawValue)
+        editor_mode: \(mode.rawValue)
+        user_requirement:
+        \(naturalLanguageDescription)
+        </skill_request>
+        """
+    }
 }
 
 struct SkillDraft: Codable, Equatable {
@@ -46,6 +93,15 @@ struct SkillDraft: Codable, Equatable {
     var explanation: String
     var requiredTools: [String]
     var permissions: [String]
+    var executionMode: SkillExecutionMode?
+    var workflow: [SkillWorkflowStep]?
+    var modelTask: SkillModelTask?
+    var networkHosts: [String]?
+    var dataDisclosure: [String]?
+
+    var resolvedExecutionMode: SkillExecutionMode {
+        executionMode ?? .cloudAssisted
+    }
 
     static func localDraft(from request: SkillCreationRequest) -> SkillDraft {
         let action = request.mode == .guided ? request.actionText : request.freeformText
@@ -63,12 +119,24 @@ struct SkillDraft: Codable, Equatable {
             output: request.outputText.isEmpty ? "在助手面板中显示结果" : request.outputText,
             explanation: "这是由本地模板生成的草稿。配置 AI 服务后，可以获得更准确的步骤、别名和能力分析。",
             requiredTools: [],
-            permissions: []
+            permissions: [],
+            executionMode: request.executionMode,
+            workflow: [],
+            modelTask: request.executionMode == .cloudAssisted
+                ? SkillModelTask(
+                    tool: "model.generateText",
+                    promptTemplate: request.naturalLanguageDescription + "\n\n用户本次输入：{{userInput}}",
+                    inputVariables: ["userInput"],
+                    providerPolicy: "userDefault"
+                )
+                : nil,
+            networkHosts: [],
+            dataDisclosure: []
         )
     }
 }
 
-struct UserSkill: Codable, Identifiable, Hashable {
+struct UserSkill: Codable, Identifiable {
     var id: UUID
     var name: String
     var aliases: [String]
@@ -83,6 +151,11 @@ struct UserSkill: Codable, Identifiable, Hashable {
     var explanation: String
     var requiredTools: [String]
     var permissions: [String]
+    var executionMode: SkillExecutionMode?
+    var workflow: [SkillWorkflowStep]?
+    var modelTask: SkillModelTask?
+    var networkHosts: [String]?
+    var dataDisclosure: [String]?
     var generatedBy: String
     var createdAt: Date
     var updatedAt: Date
@@ -103,6 +176,11 @@ struct UserSkill: Codable, Identifiable, Hashable {
         explanation = draft.explanation
         requiredTools = draft.requiredTools
         permissions = draft.permissions
+        executionMode = draft.executionMode ?? request.executionMode
+        workflow = draft.workflow
+        modelTask = draft.modelTask
+        networkHosts = draft.networkHosts
+        dataDisclosure = draft.dataDisclosure
         self.generatedBy = generatedBy
         createdAt = Date()
         updatedAt = Date()
@@ -111,6 +189,10 @@ struct UserSkill: Codable, Identifiable, Hashable {
 
     var searchTerms: [String] {
         [name, summary, originalRequest] + aliases
+    }
+
+    var resolvedExecutionMode: SkillExecutionMode {
+        executionMode ?? .cloudAssisted
     }
 }
 

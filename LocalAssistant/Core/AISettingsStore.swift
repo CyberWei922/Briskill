@@ -40,6 +40,7 @@ final class AISettingsStore: ObservableObject {
     func update(_ configuration: AIProviderConfiguration, for provider: AIProvider) {
         configurations[provider] = configuration
         persistConfigurations()
+        AppConsole.shared.info("更新 \(provider.displayName) 配置；模型=\(configuration.model)，地址=\(configuration.endpoint)", category: "Settings")
     }
 
     func apiKey(for provider: AIProvider) -> String {
@@ -50,8 +51,10 @@ final class AISettingsStore: ObservableObject {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             try KeychainStore.delete(account: provider.rawValue)
+            AppConsole.shared.warning("已删除 \(provider.displayName) API Key", category: "Keychain")
         } else {
             try KeychainStore.save(trimmed, account: provider.rawValue)
+            AppConsole.shared.success("已保存 \(provider.displayName) API Key 到 macOS Keychain", category: "Keychain")
         }
         objectWillChange.send()
     }

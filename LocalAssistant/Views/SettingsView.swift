@@ -128,6 +128,16 @@ private struct AIProviderSettingsView: View {
                 TextField("模型名称", text: $model)
                 TextField("API 地址", text: $endpoint)
                     .font(.system(.body, design: .monospaced))
+
+                if settings.selectedProvider == .gemini {
+                    Link(
+                        "在 Google AI Studio 获取 API Key",
+                        destination: URL(string: "https://aistudio.google.com/apikey")!
+                    )
+                    Text("Google AI Pro 订阅与 Gemini API 项目、额度分别管理。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section {

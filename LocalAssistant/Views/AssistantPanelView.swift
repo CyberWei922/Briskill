@@ -14,6 +14,7 @@ struct AssistantPanelView: View {
     @State private var copied = false
     @State private var requestID = UUID()
     @State private var activeTask: Task<Void, Never>?
+    @State private var selectedSuggestionIndex = 0
 
     var body: some View {
         panelContent
@@ -29,6 +30,9 @@ struct AssistantPanelView: View {
                 DispatchQueue.main.async {
                     searchIsFocused = true
                 }
+            }
+            .onChange(of: prompt) {
+                selectedSuggestionIndex = 0
             }
     }
 
@@ -132,13 +136,36 @@ struct AssistantPanelView: View {
                 .symbolEffect(.pulse, isActive: isThinking)
                 .frame(width: 24)
 
-            TextField("搜索、执行，或者问任何问题…", text: $prompt)
-                .textFieldStyle(.plain)
-                .font(.system(size: 19, weight: .regular))
-                .focused($searchIsFocused)
-                .onSubmit {
-                    executeCurrentInput()
+            ZStack(alignment: .leading) {
+                if let completionSuffix {
+                    HStack(spacing: 0) {
+                        Text(prompt)
+                            .foregroundStyle(.clear)
+                        Text(completionSuffix)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .font(.system(size: 19, weight: .regular))
+                    .lineLimit(1)
+                    .allowsHitTesting(false)
                 }
+
+                TextField("搜索、执行，或者问任何问题…", text: $prompt)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 19, weight: .regular))
+                    .focused($searchIsFocused)
+                    .onSubmit {
+                        executeCurrentInput()
+                    }
+                    .onKeyPress(.tab) {
+                        cycleSuggestion(by: 1) ? .handled : .ignored
+                    }
+                    .onKeyPress(.downArrow) {
+                        cycleSuggestion(by: 1) ? .handled : .ignored
+                    }
+                    .onKeyPress(.upArrow) {
+                        cycleSuggestion(by: -1) ? .handled : .ignored
+                    }
+            }
 
             HStack(spacing: 5) {
                 Circle()
@@ -198,7 +225,7 @@ struct AssistantPanelView: View {
 
                 Spacer()
 
-                Text(isPredicting ? "\(totalVisibleCount) 项匹配" : "选择一项立即开始")
+                Text(isPredicting ? "Tab 切换 · ↩ 执行" : "选择一项立即开始")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.tertiary)
             }
@@ -228,7 +255,7 @@ struct AssistantPanelView: View {
                         UserSkillSuggestionRow(
                             skill: skill,
                             badge: isPredicting ? "我的技能" : (index == 0 ? "最近创建" : "我的技能"),
-                            isBestMatch: isPredicting && index == 0
+                            isBestMatch: isPredicting && selectedSuggestionIndex == index
                         ) {
                             run(skill)
                         }
@@ -239,7 +266,7 @@ struct AssistantPanelView: View {
                         SkillSuggestionRow(
                             skill: skill,
                             badge: isPredicting ? skill.commandName : (visibleUserSkills.isEmpty && index == 0 ? "最近使用" : "推荐"),
-                            isBestMatch: isPredicting && visibleUserSkills.isEmpty && index == 0
+                            isBestMatch: isPredicting && selectedSuggestionIndex == visibleUserSkills.count + index
                         ) {
                             run(skill)
                         }
@@ -366,6 +393,7 @@ struct AssistantPanelView: View {
             Spacer()
 
             KeyHint(keys: "↩", label: "执行")
+            KeyHint(keys: "tab", label: "切换")
             KeyHint(keys: "esc", label: "关闭")
         }
         .font(.system(size: 10.5))
@@ -410,6 +438,50 @@ struct AssistantPanelView: View {
 
     private var totalVisibleCount: Int {
         visibleUserSkills.count + displayedBuiltInSkills.count
+    }
+
+    private var visibleSuggestionTargets: [PanelSuggestionTarget] {
+        visibleUserSkills.map(PanelSuggestionTarget.userSkill)
+            + displayedBuiltInSkills.map(PanelSuggestionTarget.builtIn)
+    }
+
+    private var selectedSuggestion: PanelSuggestionTarget? {
+        guard isPredicting, !visibleSuggestionTargets.isEmpty else { return nil }
+        return visibleSuggestionTargets[min(selectedSuggestionIndex, visibleSuggestionTargets.count - 1)]
+    }
+
+    private var completionSuffix: String? {
+        guard let selectedSuggestion else { return nil }
+        let query = trimmedPrompt
+        guard !query.isEmpty, !query.contains(where: \.isWhitespace) else { return nil }
+
+        let terms: [String]
+        switch selectedSuggestion {
+        case .userSkill(let skill):
+            terms = [skill.name] + skill.aliases
+        case .builtIn(let skill):
+            terms = [skill.commandName, skill.id] + skill.searchTerms
+        }
+
+        let normalizedQuery = normalized(query)
+        guard let completion = terms
+            .filter({ normalized($0).hasPrefix(normalizedQuery) && normalized($0) != normalizedQuery })
+            .sorted(by: { $0.count < $1.count })
+            .first,
+              completion.count >= query.count else {
+            return nil
+        }
+
+        let suffixStart = completion.index(completion.startIndex, offsetBy: query.count)
+        return String(completion[suffixStart...])
+    }
+
+    @discardableResult
+    private func cycleSuggestion(by offset: Int) -> Bool {
+        let count = visibleSuggestionTargets.count
+        guard isPredicting, count > 0 else { return false }
+        selectedSuggestionIndex = (selectedSuggestionIndex + offset + count) % count
+        return true
     }
 
     private func predictedSkills(for rawQuery: String) -> [FeatureItem] {
@@ -479,7 +551,22 @@ struct AssistantPanelView: View {
     }
 
     private func executeCurrentInput() {
+        guard !trimmedPrompt.isEmpty else { return }
+
+        if let selectedSuggestion {
+            switch selectedSuggestion {
+            case .userSkill(let userSkill):
+                AppConsole.shared.info("输入已匹配用户技能：\(userSkill.name)", category: "Assistant")
+                run(userSkill)
+            case .builtIn(let builtIn):
+                AppConsole.shared.info("输入已匹配内置技能：\(builtIn.id)", category: "Assistant")
+                run(builtIn)
+            }
+            return
+        }
+
         if let userSkill = predictedUserSkills(for: trimmedPrompt).first {
+            AppConsole.shared.info("输入已匹配用户技能：\(userSkill.name)", category: "Assistant")
             run(userSkill)
             return
         }
@@ -507,6 +594,10 @@ struct AssistantPanelView: View {
         requestID = currentRequestID
         submittedPrompt = trimmed
         copied = false
+        AppConsole.shared.info(
+            "开始处理面板请求；字符数=\(trimmed.count)，指定内置技能=\(preferredSkill?.id ?? "无")",
+            category: "Assistant"
+        )
 
         withAnimation(.easeOut(duration: 0.16)) {
             response = nil
@@ -516,6 +607,7 @@ struct AssistantPanelView: View {
         let matchedSkill = preferredSkill ?? detectSkill(in: trimmed)
         if let matchedSkill {
             remember(matchedSkill)
+            AppConsole.shared.info("已匹配内置技能：\(matchedSkill.id)", category: "Assistant")
         }
 
         if let matchedSkill {
@@ -526,6 +618,7 @@ struct AssistantPanelView: View {
         }
 
         guard aiSettings.isConfigured() else {
+            AppConsole.shared.warning("没有匹配本地命令，且尚未配置 AI 服务", category: "Assistant")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
                 finish(
                     DemoResponse(
@@ -563,6 +656,7 @@ struct AssistantPanelView: View {
                 )
             } catch {
                 guard !Task.isCancelled else { return }
+                AppConsole.shared.error("自由问答失败：\(error.localizedDescription)", category: "Assistant")
                 finish(errorResponse(error), requestID: currentRequestID)
             }
         }
@@ -574,18 +668,56 @@ struct AssistantPanelView: View {
         requestID = currentRequestID
         submittedPrompt = input
         copied = false
+        AppConsole.shared.info(
+            "开始执行用户技能：\(skill.name)；输入字符数=\(input.count)",
+            category: "Assistant"
+        )
 
         withAnimation(.easeOut(duration: 0.16)) {
             response = nil
             isThinking = true
         }
 
+        if skill.resolvedExecutionMode == .localOnly {
+            let steps = skill.actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+            let tools = skill.requiredTools.isEmpty ? "尚未声明工具" : skill.requiredTools.joined(separator: "、")
+            AppConsole.shared.info(
+                "本地技能“\(skill.name)”已匹配；不会调用云端模型；工具=\(tools)",
+                category: "Assistant"
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                finish(
+                    DemoResponse(
+                        title: skill.name,
+                        body: "这是一项仅在本机运行的技能，不会调用云端大模型。\n\n计划：\n\(steps)\n\n所需工具：\(tools)\n\n当前版本已经保存并识别这份本地工作流；对应 Tool Executor 接入后会直接按现有定义运行，无需重新创建。",
+                        skillName: "我的技能 · 本地执行",
+                        icon: "desktopcomputer",
+                        tint: .green,
+                        badge: "本地"
+                    ),
+                    requestID: currentRequestID
+                )
+            }
+            return
+        }
+
         let unavailableTools = skill.requiredTools.filter { tool in
-            let normalizedTool = tool.lowercased()
-            return !["model", "text_generation", "translate", "summarize", "rewrite"].contains(normalizedTool)
+            let normalizedTool = tool.lowercased().replacingOccurrences(of: "_", with: ".")
+            return ![
+                "model",
+                "model.generatetext",
+                "text.generation",
+                "translate",
+                "summarize",
+                "rewrite"
+            ].contains(normalizedTool)
         }
 
         if !unavailableTools.isEmpty {
+            AppConsole.shared.warning(
+                "用户技能“\(skill.name)”缺少工具：\(unavailableTools.joined(separator: "、"))",
+                category: "Assistant"
+            )
             let steps = skill.actions.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
             let missing = unavailableTools.joined(separator: "、")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -605,6 +737,7 @@ struct AssistantPanelView: View {
         }
 
         guard aiSettings.isConfigured() else {
+            AppConsole.shared.warning("用户技能“\(skill.name)”需要 AI，但尚未配置服务", category: "Assistant")
             finish(
                 DemoResponse(
                     title: skill.name,
@@ -620,16 +753,17 @@ struct AssistantPanelView: View {
         }
 
         let system = """
-        你正在执行用户保存的个人技能“\(skill.name)”。
-        原始需求：\(skill.originalRequest)
-        执行步骤：\(skill.actions.joined(separator: "；"))
+        你正在通过统一的 model.generateText 工具执行用户保存的个人技能“\(skill.name)”。
+        严格执行运行时提示词模板，只返回最终交付给用户的内容。
+        不要声称访问了未由前序工具实际提供的文件、屏幕、剪贴板或应用数据。
         输出要求：\(skill.output)
-        只返回最终交付给用户的内容。不要声称访问了未提供的文件、屏幕、剪贴板或应用数据。
         """
+        let runtimePrompt = (skill.modelTask?.promptTemplate ?? skill.originalRequest)
+            .replacingOccurrences(of: "{{userInput}}", with: input)
 
         activeTask = Task {
             do {
-                let answer = try await AIService.shared.generateText(prompt: input, system: system, maxTokens: 900)
+                let answer = try await AIService.shared.generateText(prompt: runtimePrompt, system: system, maxTokens: 900)
                 guard !Task.isCancelled else { return }
                 finish(
                     DemoResponse(
@@ -644,6 +778,7 @@ struct AssistantPanelView: View {
                 )
             } catch {
                 guard !Task.isCancelled else { return }
+                AppConsole.shared.error("用户技能“\(skill.name)”执行失败：\(error.localizedDescription)", category: "Assistant")
                 finish(errorResponse(error), requestID: currentRequestID)
             }
         }
@@ -698,6 +833,10 @@ struct AssistantPanelView: View {
             isThinking = false
             response = newResponse
         }
+        AppConsole.shared.success(
+            "面板请求完成；结果=\(newResponse.title)，字符数=\(newResponse.body.count)",
+            category: "Assistant"
+        )
     }
 
     private func errorResponse(_ error: Error) -> DemoResponse {
@@ -722,6 +861,7 @@ struct AssistantPanelView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         copied = true
+        AppConsole.shared.info("结果已复制到剪贴板；字符数=\(text.count)", category: "Assistant")
     }
 
     private func resetConversation() {
@@ -734,7 +874,13 @@ struct AssistantPanelView: View {
         isThinking = false
         copied = false
         searchIsFocused = true
+        AppConsole.shared.info("已新建面板会话", category: "Assistant")
     }
+}
+
+private enum PanelSuggestionTarget {
+    case userSkill(UserSkill)
+    case builtIn(FeatureItem)
 }
 
 private struct SkillSuggestionRow: View {

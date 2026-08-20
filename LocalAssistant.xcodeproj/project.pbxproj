@@ -25,6 +25,13 @@
 		100000000000000000000016 /* SkillGenerationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* SkillGenerationService.swift */; };
 		100000000000000000000017 /* SkillCreatorWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* SkillCreatorWindowController.swift */; };
 		100000000000000000000018 /* SkillCreatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000019 /* SkillCreatorView.swift */; };
+		100000000000000000000019 /* ConsoleEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000020 /* ConsoleEntry.swift */; };
+		100000000000000000000020 /* GenerationRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000021 /* GenerationRecord.swift */; };
+		100000000000000000000021 /* AppConsole.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000022 /* AppConsole.swift */; };
+		100000000000000000000022 /* GenerationHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000023 /* GenerationHistoryStore.swift */; };
+		100000000000000000000023 /* ConsoleWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000024 /* ConsoleWindowController.swift */; };
+		100000000000000000000024 /* ConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000025 /* ConsoleView.swift */; };
+		100000000000000000000025 /* GenerationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000026 /* GenerationHistoryView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +54,13 @@
 		200000000000000000000017 /* SkillGenerationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillGenerationService.swift; sourceTree = "<group>"; };
 		200000000000000000000018 /* SkillCreatorWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillCreatorWindowController.swift; sourceTree = "<group>"; };
 		200000000000000000000019 /* SkillCreatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillCreatorView.swift; sourceTree = "<group>"; };
+		200000000000000000000020 /* ConsoleEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleEntry.swift; sourceTree = "<group>"; };
+		200000000000000000000021 /* GenerationRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationRecord.swift; sourceTree = "<group>"; };
+		200000000000000000000022 /* AppConsole.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConsole.swift; sourceTree = "<group>"; };
+		200000000000000000000023 /* GenerationHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationHistoryStore.swift; sourceTree = "<group>"; };
+		200000000000000000000024 /* ConsoleWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleWindowController.swift; sourceTree = "<group>"; };
+		200000000000000000000025 /* ConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleView.swift; sourceTree = "<group>"; };
+		200000000000000000000026 /* GenerationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationHistoryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -100,6 +114,9 @@
 				200000000000000000000016 /* SkillStore.swift */,
 				200000000000000000000017 /* SkillGenerationService.swift */,
 				200000000000000000000018 /* SkillCreatorWindowController.swift */,
+				200000000000000000000022 /* AppConsole.swift */,
+				200000000000000000000023 /* GenerationHistoryStore.swift */,
+				200000000000000000000024 /* ConsoleWindowController.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -110,6 +127,8 @@
 				200000000000000000000005 /* FeatureItem.swift */,
 				200000000000000000000011 /* AIProvider.swift */,
 				200000000000000000000012 /* UserSkill.swift */,
+				200000000000000000000020 /* ConsoleEntry.swift */,
+				200000000000000000000021 /* GenerationRecord.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -121,6 +140,8 @@
 				200000000000000000000007 /* FeatureCard.swift */,
 				200000000000000000000008 /* SettingsView.swift */,
 				200000000000000000000019 /* SkillCreatorView.swift */,
+				200000000000000000000025 /* ConsoleView.swift */,
+				200000000000000000000026 /* GenerationHistoryView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -219,6 +240,13 @@
 				100000000000000000000016 /* SkillGenerationService.swift in Sources */,
 				100000000000000000000017 /* SkillCreatorWindowController.swift in Sources */,
 				100000000000000000000018 /* SkillCreatorView.swift in Sources */,
+				100000000000000000000019 /* ConsoleEntry.swift in Sources */,
+				100000000000000000000020 /* GenerationRecord.swift in Sources */,
+				100000000000000000000021 /* AppConsole.swift in Sources */,
+				100000000000000000000022 /* GenerationHistoryStore.swift in Sources */,
+				100000000000000000000023 /* ConsoleWindowController.swift in Sources */,
+				100000000000000000000024 /* ConsoleView.swift in Sources */,
+				100000000000000000000025 /* GenerationHistoryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -340,10 +368,12 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = 2P54P39YQ9;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -353,7 +383,7 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHighResolutionCapable = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.LocalAssistant;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -365,10 +395,12 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = 2P54P39YQ9;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -378,7 +410,7 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHighResolutionCapable = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.LocalAssistant;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

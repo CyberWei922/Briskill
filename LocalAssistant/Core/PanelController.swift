@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import SwiftUI
 
+@MainActor
 final class PanelController: NSObject, NSWindowDelegate {
     static let shared = PanelController()
 
@@ -12,6 +13,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         if panel?.isVisible == true {
             panel?.orderOut(nil)
             inputSourceSession.restore()
+            AppConsole.shared.info("快捷面板已通过快捷键隐藏", category: "Panel")
         } else {
             show()
         }
@@ -25,6 +27,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         inputSourceSession.beginInEnglish()
         panel.makeKeyAndOrderFront(nil)
+        AppConsole.shared.info("快捷面板已显示并聚焦输入框", category: "Panel")
     }
 
     func prepareForTermination() {
@@ -62,6 +65,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
         inputSourceSession.restore()
         window.orderOut(nil)
+        AppConsole.shared.info("快捷面板失去焦点并隐藏", category: "Panel")
     }
 
     private func position(_ panel: NSPanel) {
@@ -113,6 +117,7 @@ final class AssistantPanel: NSPanel {
     }
 }
 
+@MainActor
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     static let shared = SettingsWindowController()
 
@@ -122,9 +127,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let window = window ?? makeWindow()
         self.window = window
 
+        DockIconController.shared.retain(for: "settings")
         NSApplication.shared.activate(ignoringOtherApps: true)
+        window.deminiaturize(nil)
         window.center()
         window.makeKeyAndOrderFront(nil)
+        AppConsole.shared.info("设置窗口已打开", category: "Settings")
     }
 
     private func makeWindow() -> NSWindow {
@@ -141,5 +149,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.delegate = self
         window.contentView = NSHostingView(rootView: SettingsView())
         return window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        DockIconController.shared.release(for: "settings")
+        AppConsole.shared.info("设置窗口已关闭", category: "Settings")
     }
 }

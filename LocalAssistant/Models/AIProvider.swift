@@ -39,7 +39,7 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .deepSeek: "deepseek-v4-flash"
         case .glm: "glm-4.7-flash"
-        case .gemini: "gemini-2.5-flash"
+        case .gemini: "gemini-3.6-flash"
         case .openAI: "gpt-5-mini"
         }
     }
