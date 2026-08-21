@@ -34,6 +34,10 @@
 		100000000000000000000025 /* GenerationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000026 /* GenerationHistoryView.swift */; };
 		100000000000000000000026 /* MarkdownContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000027 /* MarkdownContentView.swift */; };
 		100000000000000000000027 /* ToolExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000028 /* ToolExecution.swift */; };
+		100000000000000000000029 /* AppAccent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000029 /* AppAccent.swift */; };
+		100000000000000000000030 /* InvocationRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000030 /* InvocationRecord.swift */; };
+		100000000000000000000031 /* InvocationHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000031 /* InvocationHistoryStore.swift */; };
+		100000000000000000000032 /* InvocationHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000032 /* InvocationHistoryView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -65,6 +69,10 @@
 		200000000000000000000026 /* GenerationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationHistoryView.swift; sourceTree = "<group>"; };
 		200000000000000000000027 /* MarkdownContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownContentView.swift; sourceTree = "<group>"; };
 		200000000000000000000028 /* ToolExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolExecution.swift; sourceTree = "<group>"; };
+		200000000000000000000029 /* AppAccent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccent.swift; sourceTree = "<group>"; };
+		200000000000000000000030 /* InvocationRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvocationRecord.swift; sourceTree = "<group>"; };
+		200000000000000000000031 /* InvocationHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvocationHistoryStore.swift; sourceTree = "<group>"; };
+		200000000000000000000032 /* InvocationHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvocationHistoryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -122,6 +130,7 @@
 				200000000000000000000023 /* GenerationHistoryStore.swift */,
 				200000000000000000000024 /* ConsoleWindowController.swift */,
 				200000000000000000000028 /* ToolExecution.swift */,
+				200000000000000000000031 /* InvocationHistoryStore.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -134,6 +143,8 @@
 				200000000000000000000012 /* UserSkill.swift */,
 				200000000000000000000020 /* ConsoleEntry.swift */,
 				200000000000000000000021 /* GenerationRecord.swift */,
+				200000000000000000000029 /* AppAccent.swift */,
+				200000000000000000000030 /* InvocationRecord.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -148,6 +159,7 @@
 				200000000000000000000025 /* ConsoleView.swift */,
 				200000000000000000000026 /* GenerationHistoryView.swift */,
 				200000000000000000000027 /* MarkdownContentView.swift */,
+				200000000000000000000032 /* InvocationHistoryView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -255,6 +267,10 @@
 				100000000000000000000025 /* GenerationHistoryView.swift in Sources */,
 				100000000000000000000026 /* MarkdownContentView.swift in Sources */,
 				100000000000000000000027 /* ToolExecution.swift in Sources */,
+				100000000000000000000029 /* AppAccent.swift in Sources */,
+				100000000000000000000030 /* InvocationRecord.swift in Sources */,
+				100000000000000000000031 /* InvocationHistoryStore.swift in Sources */,
+				100000000000000000000032 /* InvocationHistoryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -379,7 +395,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2P54P39YQ9;
 				ENABLE_APP_SANDBOX = NO;
@@ -390,8 +406,9 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHighResolutionCapable = YES;
+				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Local Assistant 仅在你运行截图 OCR 技能时读取你主动框选的屏幕区域。";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.LocalAssistant;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -406,7 +423,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2P54P39YQ9;
 				ENABLE_APP_SANDBOX = NO;
@@ -417,8 +434,9 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHighResolutionCapable = YES;
+				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Local Assistant 仅在你运行截图 OCR 技能时读取你主动框选的屏幕区域。";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.LocalAssistant;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

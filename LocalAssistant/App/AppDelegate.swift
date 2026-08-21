@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalHotKey: GlobalHotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppAppearance.apply(
+            UserDefaults.standard.string(forKey: "preferredAppearance") ?? "system"
+        )
         globalHotKey = GlobalHotKey()
         AppConsole.shared.info("应用启动完成，全局快捷键已注册", category: "Lifecycle")
 
@@ -76,16 +79,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             var debugValues: [String: String] = [:]
+            var debugFiles: [String: [URL]] = [:]
             if let parameter = skill.resolvedParameters.first,
                let flagIndex = ProcessInfo.processInfo.arguments.firstIndex(of: "--run-skill-debug"),
                ProcessInfo.processInfo.arguments.indices.contains(flagIndex + 2) {
-                debugValues[parameter.id] = ProcessInfo.processInfo.arguments[flagIndex + 2]
+                let debugArgument = ProcessInfo.processInfo.arguments[flagIndex + 2]
+                if parameter.type.acceptsFiles {
+                    debugFiles[parameter.id] = [URL(fileURLWithPath: debugArgument)]
+                } else {
+                    debugValues[parameter.id] = debugArgument
+                }
             }
             let result = try await WorkflowEngine.shared.execute(
                 skill: skill,
                 input: keyword,
                 values: debugValues,
-                files: [:]
+                files: debugFiles
             )
             let trimmedOutput = result.outputText.trimmingCharacters(in: .whitespacesAndNewlines)
             let outputFormat = trimmedOutput.hasPrefix("{") || trimmedOutput.hasPrefix("[") || trimmedOutput.hasPrefix("```json")

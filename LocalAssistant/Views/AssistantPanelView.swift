@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct AssistantPanelView: View {
     @AppStorage("recentSkillIDs") private var recentSkillIDs = "ocr,summarize,files,rewrite"
+    @AppStorage("appAccent") private var appAccent = AppAccent.purple.rawValue
     @ObservedObject private var skillStore = SkillStore.shared
     @ObservedObject private var aiSettings = AISettingsStore.shared
     @FocusState private var searchIsFocused: Bool
@@ -20,6 +21,9 @@ struct AssistantPanelView: View {
     @State private var parameterValues: [String: String] = [:]
     @State private var parameterFiles: [String: [URL]] = [:]
     @State private var tabCompletion: PanelTabCompletion?
+    @State private var requestStartedAt = Date()
+    @State private var responseScrollEdges = PanelScrollEdges()
+    @State private var executionActivity: PanelExecutionActivity?
 
     var body: some View {
         panelContent
@@ -36,6 +40,7 @@ struct AssistantPanelView: View {
             }
             .padding(14)
             .frame(minWidth: 720, minHeight: 450)
+            .tint(accentColor)
             .onAppear {
                 DispatchQueue.main.async {
                     searchIsFocused = true
@@ -53,6 +58,10 @@ struct AssistantPanelView: View {
         RoundedRectangle(cornerRadius: 34, style: .continuous)
     }
 
+    private var accentColor: Color {
+        AppAccent.resolve(appAccent).color
+    }
+
     private var panelBackground: some View {
         ZStack {
             panelShape
@@ -62,7 +71,7 @@ struct AssistantPanelView: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color.indigo.opacity(0.075),
+                            accentColor.opacity(0.075),
                             Color.clear,
                             Color.cyan.opacity(0.035)
                         ],
@@ -94,61 +103,23 @@ struct AssistantPanelView: View {
     @ViewBuilder
     private var searchControls: some View {
         if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 12) {
-                HStack(spacing: 12) {
-                    searchFieldContent
-                        .glassEffect(
-                            .regular.interactive(),
-                            in: RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        )
-
-                    Button {
-                        executeCurrentInput()
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 14, weight: .bold))
-                            .frame(width: 22, height: 22)
-                    }
-                    .buttonStyle(.glassProminent)
-                    .controlSize(.large)
-                    .tint(.indigo)
-                    .disabled(!canExecuteCurrentState)
-                    .help("发送")
-                }
-            }
+            searchFieldContent
+                .glassEffect(
+                    .regular.interactive(),
+                    in: RoundedRectangle(cornerRadius: 24, style: .continuous)
+                )
         } else {
-            HStack(spacing: 12) {
-                searchFieldContent
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 24, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.8)
-                    }
-
-                Button {
-                    executeCurrentInput()
-                } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 14, weight: .bold))
-                        .frame(width: 22, height: 22)
+            searchFieldContent
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.8)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .tint(.indigo)
-                .disabled(!canExecuteCurrentState)
-                .help("发送")
-            }
         }
     }
 
     private var searchFieldContent: some View {
         HStack(spacing: 12) {
-            Image(systemName: isThinking ? "sparkles" : "magnifyingglass")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(isThinking ? Color.indigo : Color.secondary)
-                .symbolEffect(.pulse, isActive: isThinking)
-                .frame(width: 24)
-
             ZStack(alignment: .leading) {
                 if let inlineCompletion {
                     HStack(spacing: 0) {
@@ -187,7 +158,7 @@ struct AssistantPanelView: View {
             if let attachedFile = firstAttachedFile {
                 HStack(spacing: 5) {
                     Image(systemName: attachedFile.url.hasDirectoryPath ? "folder.fill" : "doc.fill")
-                        .foregroundStyle(Color.indigo)
+                        .foregroundStyle(accentColor)
                     Text(attachedFile.url.lastPathComponent)
                         .lineLimit(1)
                         .frame(maxWidth: 100)
@@ -226,9 +197,9 @@ struct AssistantPanelView: View {
 
             HStack(spacing: 5) {
                 Circle()
-                    .fill(aiSettings.isConfigured() ? Color.green : Color.secondary)
+                    .fill(serviceStatusIsAvailable ? Color.green : Color.secondary)
                     .frame(width: 6, height: 6)
-                Text(aiSettings.isConfigured() ? aiSettings.selectedProvider.shortName : "本地")
+                Text(serviceStatusLabel)
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -236,17 +207,32 @@ struct AssistantPanelView: View {
             .padding(.vertical, 4)
             .background(Color.primary.opacity(0.055), in: Capsule())
 
+            Button {
+                executeCurrentInput()
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(canExecuteCurrentState ? accentColor : Color.secondary.opacity(0.38))
+                    .frame(width: 28, height: 28)
+                    .background(
+                        canExecuteCurrentState ? accentColor.opacity(0.11) : Color.clear,
+                        in: Circle()
+                    )
+                    .contentShape(Circle())
+                    .symbolEffect(.pulse, isActive: isThinking)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canExecuteCurrentState)
+            .help("搜索或执行")
+
             if !prompt.isEmpty {
                 Button {
-                    if pendingSkill != nil {
-                        cancelParameterEntry(clearPrompt: true)
-                    } else {
-                        prompt = ""
-                    }
+                    prompt = ""
                     searchIsFocused = true
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.tertiary)
+                        .frame(width: 24, height: 28)
                 }
                 .buttonStyle(.plain)
                 .help("清空")
@@ -298,9 +284,9 @@ struct AssistantPanelView: View {
             HStack(spacing: 10) {
                 Image(systemName: nextUnfilledFileParameter == nil ? "text.cursor" : "paperclip")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Color.indigo)
+                    .foregroundStyle(accentColor)
                     .frame(width: 34, height: 34)
-                    .background(Color.indigo.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(nextInlineParameterHint.map { "下一项：\($0)" } ?? "参数已经齐全")
@@ -365,7 +351,7 @@ struct AssistantPanelView: View {
                         let skill = visibleUserSkills[index]
                         UserSkillSuggestionRow(
                             skill: skill,
-                            badge: isPredicting ? "我的技能" : (index == 0 ? "最近创建" : "我的技能"),
+                            badge: skill.isBuiltIn ? "内置技能" : (isPredicting ? "我的技能" : (index == 0 ? "最近创建" : "我的技能")),
                             isBestMatch: isPredicting && selectedSuggestionIndex == index
                         ) {
                             run(skill)
@@ -396,25 +382,43 @@ struct AssistantPanelView: View {
     }
 
     private var thinkingView: some View {
-        VStack(spacing: 13) {
+        let activity = executionActivity ?? .preparing(scope: .local)
+
+        return VStack(spacing: 13) {
             Spacer()
 
             ZStack {
                 Circle()
-                    .fill(Color.indigo.opacity(0.10))
+                    .fill(accentColor.opacity(0.10))
                     .frame(width: 42, height: 42)
 
-                Image(systemName: "sparkles")
-                    .foregroundStyle(Color.indigo)
+                Image(systemName: activityIcon(for: activity.toolIdentifier))
+                    .foregroundStyle(accentColor)
                     .symbolEffect(.variableColor.iterative, options: .repeating)
             }
 
-            Text("正在理解你的请求")
+            Text(activityTitle(for: activity.toolIdentifier))
                 .font(.system(size: 13.5, weight: .semibold))
 
-            Text(aiSettings.isConfigured() ? "正在调用 \(aiSettings.selectedProvider.displayName)…" : "正在匹配本地命令与技能…")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
+            if let fraction = activity.fractionCompleted {
+                HStack(spacing: 9) {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: 150)
+
+                    Text("\(Int((fraction * 100).rounded()))%")
+                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .frame(width: 34, alignment: .trailing)
+                }
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            Text(activityDetail(activity))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
 
             Spacer()
         }
@@ -443,10 +447,10 @@ struct AssistantPanelView: View {
 
                     Text(response.badge)
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Color.indigo)
+                        .foregroundStyle(accentColor)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.indigo.opacity(0.09), in: Capsule())
+                        .background(accentColor.opacity(0.09), in: Capsule())
                 }
 
                 Text(submittedPrompt)
@@ -486,6 +490,23 @@ struct AssistantPanelView: View {
             .padding(.bottom, 10)
         }
         .scrollIndicators(.hidden)
+        .onScrollGeometryChange(for: PanelScrollEdges.self) { geometry in
+            let tolerance: CGFloat = 2
+            let hasContentAbove = geometry.contentOffset.y + geometry.contentInsets.top > tolerance
+            let hasContentBelow = geometry.visibleRect.maxY < geometry.contentSize.height - tolerance
+            return PanelScrollEdges(
+                hasContentAbove: hasContentAbove,
+                hasContentBelow: hasContentBelow
+            )
+        } action: { _, newValue in
+            if responseScrollEdges != newValue {
+                responseScrollEdges = newValue
+            }
+        }
+        .mask {
+            PanelScrollEdgeMask(edges: responseScrollEdges)
+        }
+        .animation(.easeOut(duration: 0.14), value: responseScrollEdges)
     }
 
     private var footer: some View {
@@ -521,6 +542,90 @@ struct AssistantPanelView: View {
             return missingRequiredParameters.isEmpty
         }
         return !trimmedPrompt.isEmpty
+    }
+
+    private var serviceStatusLabel: String {
+        if let executionActivity, isThinking || response != nil {
+            return executionActivity.scope.label(provider: aiSettings.selectedProvider.shortName)
+        }
+        if let pendingSkill {
+            return executionScope(for: pendingSkill).label(provider: aiSettings.selectedProvider.shortName)
+        }
+        return aiSettings.isConfigured() ? aiSettings.selectedProvider.shortName : "本地"
+    }
+
+    private var serviceStatusIsAvailable: Bool {
+        if let executionActivity, isThinking || response != nil {
+            return executionActivity.scope == .local || aiSettings.isConfigured()
+        }
+        if let pendingSkill {
+            let scope = executionScope(for: pendingSkill)
+            return scope == .local || aiSettings.isConfigured()
+        }
+        return aiSettings.isConfigured()
+    }
+
+    private func executionScope(for skill: UserSkill) -> PanelExecutionScope {
+        var toolIdentifiers = (skill.workflow ?? []).map(\.tool) + skill.requiredTools
+        if let modelTool = skill.modelTask?.tool {
+            toolIdentifiers.append(modelTool)
+        }
+        if toolIdentifiers.isEmpty {
+            return skill.resolvedExecutionMode == .cloudAssisted ? .cloud : .local
+        }
+        return executionScope(forToolIdentifiers: toolIdentifiers)
+    }
+
+    private func executionScope(forToolIdentifiers identifiers: [String]) -> PanelExecutionScope {
+        let canonicalIdentifiers = identifiers.map {
+            ToolRegistry.shared.canonicalIdentifier(for: $0)
+        }
+        let usesCloud = canonicalIdentifiers.contains("model.generateText")
+        let usesLocal = canonicalIdentifiers.contains { $0 != "model.generateText" }
+        if usesCloud && usesLocal { return .hybrid }
+        return usesCloud ? .cloud : .local
+    }
+
+    private func activityTitle(for toolIdentifier: String) -> String {
+        switch toolIdentifier {
+        case "clipboard.readText": "正在读取剪贴板"
+        case "clipboard.writeText": "正在写入剪贴板"
+        case "selection.readText": "正在读取选中文字"
+        case "selection.replaceText": "正在替换选中文字"
+        case "image.ocr": "正在使用 Apple Vision 识别文字"
+        case "screen.captureRegion": "正在等待选择截图区域"
+        case "file.readText": "正在读取文件内容"
+        case "file.list": "正在整理文件列表"
+        case "file.search": "正在搜索本地文件"
+        case "file.rename": "正在重命名文件"
+        case "file.move": "正在移动文件"
+        case "file.trash": "正在移到废纸篓"
+        case "system.snapshot": "正在读取系统状态"
+        case "model.generateText": "正在调用 \(aiSettings.selectedProvider.displayName)"
+        case "local.match": "正在匹配本地技能"
+        default: "正在执行技能"
+        }
+    }
+
+    private func activityIcon(for toolIdentifier: String) -> String {
+        switch toolIdentifier {
+        case "clipboard.readText", "clipboard.writeText": "doc.on.clipboard"
+        case "selection.readText", "selection.replaceText": "selection.pin.in.out"
+        case "image.ocr": "text.viewfinder"
+        case "screen.captureRegion": "viewfinder"
+        case "file.readText": "doc.text"
+        case "file.list", "file.search", "file.rename", "file.move", "file.trash": "folder"
+        case "system.snapshot": "gauge.with.dots.needle.50percent"
+        case "model.generateText": "sparkles"
+        default: "bolt"
+        }
+    }
+
+    private func activityDetail(_ activity: PanelExecutionActivity) -> String {
+        let source = activity.scope.label(provider: aiSettings.selectedProvider.shortName)
+        guard activity.totalSteps > 1 else { return source }
+        let currentStep = min(activity.completedSteps + 1, activity.totalSteps)
+        return "\(source) · 第 \(currentStep)/\(activity.totalSteps) 步"
     }
 
     private var missingRequiredParameters: [String] {
@@ -599,13 +704,13 @@ struct AssistantPanelView: View {
 
     private var visibleUserSkills: [UserSkill] {
         if isPredicting {
-            return Array(predictedUserSkills(for: trimmedPrompt).prefix(3))
+            return Array(predictedUserSkills(for: trimmedPrompt).prefix(4))
         }
-        return Array(skillStore.skills.filter(\.isEnabled).prefix(1))
+        return Array(skillStore.skills.filter(\.isEnabled).prefix(4))
     }
 
     private var displayedBuiltInSkills: [FeatureItem] {
-        Array(visibleSkills.prefix(max(0, 4 - visibleUserSkills.count)))
+        []
     }
 
     private var totalVisibleCount: Int {
@@ -713,6 +818,11 @@ struct AssistantPanelView: View {
     private func handlePromptChange(from oldValue: String, to newValue: String) {
         defer { selectedSuggestionIndex = 0 }
 
+        if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            clearPanelForEmptyPrompt()
+            return
+        }
+
         if let pendingSkill {
             tabCompletion = nil
             guard commandMatches(skill: pendingSkill, input: newValue) else {
@@ -751,11 +861,44 @@ struct AssistantPanelView: View {
         acceptCommand(suggestion, command: command, enteredText: "")
     }
 
+    private func clearPanelForEmptyPrompt() {
+        if isThinking, !submittedPrompt.isEmpty {
+            InvocationHistoryStore.shared.add(
+                InvocationRecord(
+                    id: requestID,
+                    startedAt: requestStartedAt,
+                    endedAt: Date(),
+                    status: .cancelled,
+                    input: submittedPrompt,
+                    title: "请求已取消",
+                    source: "快捷面板",
+                    result: "用户在请求完成前清空了输入框。",
+                    tools: [],
+                    didWriteClipboard: false
+                )
+            )
+        }
+
+        activeTask?.cancel()
+        activeTask = nil
+        cancelParameterEntry(clearPrompt: false)
+        requestID = UUID()
+        submittedPrompt = ""
+        copied = false
+        executionActivity = nil
+
+        withAnimation(.easeOut(duration: 0.14)) {
+            isThinking = false
+            response = nil
+        }
+
+        searchIsFocused = true
+        AppConsole.shared.info("输入已清空，快捷面板恢复默认状态", category: "Assistant")
+    }
+
     private func suggestionTarget(for query: String, index: Int) -> PanelSuggestionTarget? {
-        let userSkills = Array(predictedUserSkills(for: query).prefix(3))
-        let builtIns = Array(predictedSkills(for: query).prefix(max(0, 4 - userSkills.count)))
-        let targets = userSkills.map(PanelSuggestionTarget.userSkill)
-            + builtIns.map(PanelSuggestionTarget.builtIn)
+        let targets = Array(predictedUserSkills(for: query).prefix(4))
+            .map(PanelSuggestionTarget.userSkill)
         guard !targets.isEmpty else { return nil }
         return targets[min(index, targets.count - 1)]
     }
@@ -897,8 +1040,7 @@ struct AssistantPanelView: View {
             run(userSkill)
             return
         }
-        let preferredSkill = predictedSkills(for: trimmedPrompt).first
-        submit(prompt, preferredSkill: preferredSkill)
+        submit(prompt)
     }
 
     private func run(_ skill: FeatureItem) {
@@ -1070,8 +1212,12 @@ struct AssistantPanelView: View {
         let currentRequestID = UUID()
         activeTask?.cancel()
         requestID = currentRequestID
+        requestStartedAt = Date()
         submittedPrompt = trimmed
         copied = false
+        executionActivity = preferredSkill == nil
+            ? .preparing(scope: .cloud, toolIdentifier: "model.generateText")
+            : .preparing(scope: .local, toolIdentifier: "local.match")
         AppConsole.shared.info(
             "开始处理面板请求；字符数=\(trimmed.count)，指定内置技能=\(preferredSkill?.id ?? "无")",
             category: "Assistant"
@@ -1082,7 +1228,7 @@ struct AssistantPanelView: View {
             isThinking = true
         }
 
-        let matchedSkill = preferredSkill ?? detectSkill(in: trimmed)
+        let matchedSkill = preferredSkill
         if let matchedSkill {
             remember(matchedSkill)
             AppConsole.shared.info("已匹配内置技能：\(matchedSkill.id)", category: "Assistant")
@@ -1107,7 +1253,8 @@ struct AssistantPanelView: View {
                         tint: .orange,
                         badge: "需要设置"
                     ),
-                    requestID: currentRequestID
+                    requestID: currentRequestID,
+                    status: .failed
                 )
             }
             return
@@ -1130,7 +1277,7 @@ struct AssistantPanelView: View {
                         body: answer,
                         skillName: "由 \(aiSettings.selectedProvider.displayName) 回答",
                         icon: "bubble.left.and.text.bubble.right",
-                        tint: .indigo,
+                        tint: accentColor,
                         badge: aiSettings.selectedProvider.shortName
                     ),
                     requestID: currentRequestID
@@ -1152,8 +1299,14 @@ struct AssistantPanelView: View {
         let currentRequestID = UUID()
         activeTask?.cancel()
         requestID = currentRequestID
+        requestStartedAt = Date()
         submittedPrompt = input
         copied = false
+        let plannedScope = executionScope(for: skill)
+        let firstTool = skill.workflow?.first.map {
+            ToolRegistry.shared.canonicalIdentifier(for: $0.tool)
+        } ?? (plannedScope == .local ? "local.match" : "model.generateText")
+        executionActivity = .preparing(scope: plannedScope, toolIdentifier: firstTool)
         AppConsole.shared.info(
             "开始执行用户技能：\(skill.name)；输入字符数=\(input.count)，文本参数=\(values.count)，文件参数=\(files.values.flatMap { $0 }.count)",
             category: "Assistant"
@@ -1173,21 +1326,28 @@ struct AssistantPanelView: View {
             isThinking = true
         }
 
-        if files.values.contains(where: { !$0.isEmpty }) {
+        let workflowTools = Set((skill.workflow ?? []).map {
+            ToolRegistry.shared.canonicalIdentifier(for: $0.tool)
+        })
+        let requiresModel = workflowTools.contains("model.generateText")
+            || skill.requiredTools.contains { ToolRegistry.shared.canonicalIdentifier(for: $0) == "model.generateText" }
+        let convertsFilesToText = !workflowTools.isDisjoint(with: Set(["file.readText", "image.ocr"]))
+        if files.values.contains(where: { !$0.isEmpty }), requiresModel, !convertsFilesToText {
             AppConsole.shared.warning(
-                "技能“\(skill.name)”已接收文件参数，但当前统一模型执行器尚未发送多模态内容",
+                "技能“\(skill.name)”已接收文件参数，但工作流没有先使用文件读取或 OCR 工具",
                 category: "Assistant"
             )
             finish(
                 DemoResponse(
                     title: skill.name,
-                    body: "文件参数已经成功传入：\n\(runtimeParameterSummary)\n\n当前统一模型接口仍是纯文本通道，所以不会把文件路径假装成文件内容发给模型。接入 Gemini 等模型的多模态请求格式，或先由 OCR / 文件读取工具产出文本后，这份技能定义可以直接继续执行。",
+                    body: "文件参数已经成功传入：\n\(runtimeParameterSummary)\n\n这个技能会直接调用纯文本模型，却没有先通过 `file.readText` 或 `image.ocr` 把文件转换成文字。为避免把文件路径误当成文件内容，当前不会继续发送。请在技能工作流中加入文件读取/OCR 步骤，或等待多模态模型通道接入。",
                     skillName: "我的技能 · 参数已接收",
                     icon: "paperclip",
                     tint: .orange,
                     badge: "等待多模态执行器"
                 ),
-                requestID: currentRequestID
+                requestID: currentRequestID,
+                status: .failed
             )
             return
         }
@@ -1206,10 +1366,11 @@ struct AssistantPanelView: View {
                     body: "这项技能已经保存并成功匹配，但还不能完整执行。\n\n计划：\n\(steps)\n\n还需要接入：\(missing)\n\n完成对应系统工具后，不需要重新创建技能，它会直接使用现有定义运行。",
                     skillName: "我的技能 · \(skill.generatedBy)",
                     icon: "bolt.fill",
-                    tint: .purple,
+                    tint: accentColor,
                     badge: "等待工具"
                 ),
-                requestID: currentRequestID
+                requestID: currentRequestID,
+                status: .failed
             )
 
         case .ready:
@@ -1219,23 +1380,43 @@ struct AssistantPanelView: View {
                         skill: skill,
                         input: input,
                         values: values,
-                        files: files
+                        files: files,
+                        progress: { progress in
+                            guard requestID == currentRequestID else { return }
+                            executionActivity = PanelExecutionActivity(
+                                toolIdentifier: progress.toolIdentifier,
+                                scope: plannedScope,
+                                completedSteps: progress.completedSteps,
+                                totalSteps: progress.totalSteps,
+                                fractionCompleted: progress.fractionCompleted
+                            )
+                        }
                     )
                     guard !Task.isCancelled else { return }
                     copied = result.didWriteClipboard
-                    let sourceName = skill.resolvedExecutionMode == .localOnly
-                        ? "我的技能 · 本地执行"
-                        : "我的技能 · \(skill.generatedBy)"
+                    let source = skill.isBuiltIn ? "内置技能" : "我的技能"
+                    let actualScope = executionScope(forToolIdentifiers: result.executedTools)
+                    let scopeLabel = actualScope.label(provider: aiSettings.selectedProvider.shortName)
+                    let sourceName = "\(source) · \(actualScope.historyLabel(provider: aiSettings.selectedProvider.displayName))"
+                    executionActivity = PanelExecutionActivity(
+                        toolIdentifier: result.executedTools.last ?? firstTool,
+                        scope: actualScope,
+                        completedSteps: result.executedTools.count,
+                        totalSteps: max(result.executedTools.count, 1),
+                        fractionCompleted: 1
+                    )
                     finish(
                         DemoResponse(
                             title: skill.name,
                             body: result.outputText,
                             skillName: sourceName,
                             icon: result.didWriteClipboard ? "doc.on.clipboard.fill" : "bolt.fill",
-                            tint: result.didWriteClipboard ? .green : .purple,
-                            badge: result.didWriteClipboard ? "已复制" : aiSettings.selectedProvider.shortName
+                            tint: result.didWriteClipboard ? .green : accentColor,
+                            badge: scopeLabel
                         ),
-                        requestID: currentRequestID
+                        requestID: currentRequestID,
+                        tools: result.executedTools,
+                        didWriteClipboard: result.didWriteClipboard
                     )
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -1284,13 +1465,35 @@ struct AssistantPanelView: View {
             body: "这是当前问答界面的演示回答。接入本地模型后，我会先理解你的意图，再选择合适的安全工具；普通问题则会直接在这里给出简短回答。",
             skillName: "自由问答",
             icon: "bubble.left.and.text.bubble.right",
-            tint: .indigo,
+            tint: accentColor,
             badge: "本地"
         )
     }
 
-    private func finish(_ newResponse: DemoResponse, requestID expectedID: UUID) {
+    private func finish(
+        _ newResponse: DemoResponse,
+        requestID expectedID: UUID,
+        tools: [String] = [],
+        didWriteClipboard: Bool = false,
+        status explicitStatus: InvocationRecordStatus? = nil
+    ) {
         guard requestID == expectedID else { return }
+        let status = explicitStatus
+            ?? (newResponse.icon.contains("exclamationmark") ? .failed : .completed)
+        InvocationHistoryStore.shared.add(
+            InvocationRecord(
+                id: expectedID,
+                startedAt: requestStartedAt,
+                endedAt: Date(),
+                status: status,
+                input: submittedPrompt,
+                title: newResponse.title,
+                source: newResponse.skillName,
+                result: newResponse.body,
+                tools: tools,
+                didWriteClipboard: didWriteClipboard
+            )
+        )
         withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
             isThinking = false
             response = newResponse
@@ -1328,6 +1531,22 @@ struct AssistantPanelView: View {
     }
 
     private func resetConversation() {
+        if isThinking, !submittedPrompt.isEmpty {
+            InvocationHistoryStore.shared.add(
+                InvocationRecord(
+                    id: requestID,
+                    startedAt: requestStartedAt,
+                    endedAt: Date(),
+                    status: .cancelled,
+                    input: submittedPrompt,
+                    title: "请求已取消",
+                    source: "快捷面板",
+                    result: "用户在请求完成前新建了会话。",
+                    tools: [],
+                    didWriteClipboard: false
+                )
+            )
+        }
         activeTask?.cancel()
         activeTask = nil
         cancelParameterEntry(clearPrompt: false)
@@ -1337,6 +1556,7 @@ struct AssistantPanelView: View {
         response = nil
         isThinking = false
         copied = false
+        executionActivity = nil
         searchIsFocused = true
         AppConsole.shared.info("已新建面板会话", category: "Assistant")
     }
@@ -1345,6 +1565,79 @@ struct AssistantPanelView: View {
 private enum PanelSuggestionTarget {
     case userSkill(UserSkill)
     case builtIn(FeatureItem)
+}
+
+private enum PanelExecutionScope: Equatable {
+    case local
+    case cloud
+    case hybrid
+
+    func label(provider: String) -> String {
+        switch self {
+        case .local: "本地"
+        case .cloud: provider
+        case .hybrid: "\(provider) + 本地"
+        }
+    }
+
+    func historyLabel(provider: String) -> String {
+        switch self {
+        case .local: "本地执行"
+        case .cloud: provider
+        case .hybrid: "\(provider) + 本地工具"
+        }
+    }
+}
+
+private struct PanelExecutionActivity: Equatable {
+    let toolIdentifier: String
+    let scope: PanelExecutionScope
+    let completedSteps: Int
+    let totalSteps: Int
+    let fractionCompleted: Double?
+
+    static func preparing(
+        scope: PanelExecutionScope,
+        toolIdentifier: String = "local.match"
+    ) -> PanelExecutionActivity {
+        PanelExecutionActivity(
+            toolIdentifier: toolIdentifier,
+            scope: scope,
+            completedSteps: 0,
+            totalSteps: 1,
+            fractionCompleted: nil
+        )
+    }
+}
+
+private struct PanelScrollEdges: Equatable {
+    var hasContentAbove = false
+    var hasContentBelow = false
+}
+
+private struct PanelScrollEdgeMask: View {
+    let edges: PanelScrollEdges
+
+    var body: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: edges.hasContentAbove ? [.clear, .black] : [.black, .black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 22)
+
+            Rectangle()
+                .fill(.black)
+
+            LinearGradient(
+                colors: edges.hasContentBelow ? [.black, .clear] : [.black, .black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 30)
+        }
+    }
 }
 
 private struct PanelTabCompletion {
@@ -1441,15 +1734,20 @@ private struct UserSkillSuggestionRow: View {
     let action: () -> Void
 
     @State private var isHovering = false
+    @AppStorage("appAccent") private var appAccent = AppAccent.purple.rawValue
+
+    private var accentColor: Color {
+        AppAccent.resolve(appAccent).color
+    }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: "bolt.fill")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.purple)
+                    .foregroundStyle(accentColor)
                     .frame(width: 32, height: 32)
-                    .background(Color.purple.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .background(accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(skill.name)
@@ -1465,10 +1763,10 @@ private struct UserSkillSuggestionRow: View {
 
                 Text(badge)
                     .font(.system(size: 10, design: .rounded))
-                    .foregroundStyle(Color.purple)
+                    .foregroundStyle(accentColor)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
-                    .background(Color.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .background(accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
 
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))

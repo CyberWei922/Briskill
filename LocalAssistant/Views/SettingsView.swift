@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     @AppStorage("preferredAppearance") private var preferredAppearance = "system"
+    @AppStorage("appAccent") private var appAccent = AppAccent.purple.rawValue
     @State private var selection: SettingsSection? = .general
     @State private var navigationHistory: [SettingsSection] = [.general]
     @State private var navigationIndex = 0
@@ -33,9 +34,17 @@ struct SettingsView: View {
             Divider()
 
             rightDetail
+                .background(Color(nsColor: .windowBackgroundColor))
         }
         .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 680, minHeight: 520)
+        .tint(accentColor)
+        .onAppear {
+            AppAppearance.apply(preferredAppearance)
+        }
+        .onChange(of: preferredAppearance) { _, newValue in
+            AppAppearance.apply(newValue)
+        }
         .onChange(of: selection) {
             recordSelectionInHistory()
         }
@@ -43,6 +52,10 @@ struct SettingsView: View {
 
     private var currentSection: SettingsSection {
         selection ?? .general
+    }
+
+    private var accentColor: Color {
+        AppAccent.resolve(appAccent).color
     }
 
     @ViewBuilder
@@ -98,7 +111,7 @@ struct SettingsView: View {
     private var settingsDetail: some View {
         switch currentSection {
         case .general: generalSettings
-        case .appearance: appearanceSettings
+        case .history: InvocationHistorySettingsView()
         case .aiServices: AIProviderSettingsView()
         case .localModel: modelSettings
         case .skills: EmptyView()
@@ -120,29 +133,47 @@ struct SettingsView: View {
                     }
                 }
             }
-            Section {
-                Text("全局快捷键已经生效；登录启动和菜单栏开关将在后续版本连接系统设置。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private var appearanceSettings: some View {
-        Form {
-            Section("主题") {
+            Section("外观") {
                 Picker("外观", selection: $preferredAppearance) {
                     Text("跟随系统").tag("system")
                     Text("浅色").tag("light")
                     Text("深色").tag("dark")
                 }
                 .pickerStyle(.segmented)
+
+                LabeledContent("主题色") {
+                    HStack(spacing: 10) {
+                        ForEach(AppAccent.allCases) { accent in
+                            Button {
+                                appAccent = accent.rawValue
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(accent.color)
+                                        .frame(width: 22, height: 22)
+                                    if appAccent == accent.rawValue {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundStyle(.white)
+                                    }
+                                }
+                                .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .help(accent.displayName)
+                        }
+                    }
+                }
             }
             Section("主面板") {
                 LabeledContent("尺寸", value: "紧凑")
                 LabeledContent("透明效果", value: "系统材质")
                 LabeledContent("失去焦点", value: "自动隐藏")
+            }
+            Section {
+                Text("全局快捷键已经生效；登录启动和菜单栏开关将在后续版本连接系统设置。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -168,6 +199,7 @@ struct SettingsView: View {
             Section("本地优先") {
                 Label("API Key 保存在 macOS 钥匙串中", systemImage: "key.fill")
                 Label("自定义技能保存在 Application Support", systemImage: "externaldrive.fill")
+                Label("调用输入和结果历史保存在 Application Support，可单独删除或清空", systemImage: "clock.arrow.circlepath")
                 Label("创建技能时不会上传真实文件、截图或剪贴板内容", systemImage: "checkmark.shield")
             }
             Section("未来权限") {
@@ -184,7 +216,8 @@ private extension View {
     @ViewBuilder
     func settingsSidebarGlass() -> some View {
         if #available(macOS 26.0, *) {
-            glassEffect(.regular, in: Rectangle())
+            background(.ultraThinMaterial)
+                .glassEffect(.regular, in: Rectangle())
         } else {
             background(.ultraThinMaterial)
         }
@@ -290,7 +323,7 @@ private struct SettingsHistoryControl: View {
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
     case general
-    case appearance
+    case history
     case aiServices
     case localModel
     case skills
@@ -301,7 +334,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .general: "通用"
-        case .appearance: "外观"
+        case .history: "历史记录"
         case .aiServices: "AI 服务"
         case .localModel: "本地模型"
         case .skills: "技能管理"
@@ -312,7 +345,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general: "gearshape"
-        case .appearance: "paintbrush"
+        case .history: "clock.arrow.circlepath"
         case .aiServices: "sparkles"
         case .localModel: "cpu"
         case .skills: "square.stack.3d.up"
@@ -595,9 +628,19 @@ private struct SkillManagementRow: View {
                 .frame(width: 26, height: 26)
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
-                Text(skill.name)
-                    .lineLimit(1)
-                    .font(.system(size: 12, weight: .semibold))
+                HStack(spacing: 6) {
+                    Text(skill.name)
+                        .lineLimit(1)
+                        .font(.system(size: 12, weight: .semibold))
+                    if skill.isBuiltIn {
+                        Text("内置技能")
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundStyle(.indigo)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.indigo.opacity(0.10), in: Capsule())
+                    }
+                }
                 Text(skill.aliases.first ?? skill.summary)
                     .lineLimit(1)
                     .font(.system(size: 9.5))
@@ -656,10 +699,20 @@ private struct SkillEditorView: View {
                 )
 
                 VStack(alignment: .leading, spacing: 2) {
-                    TextField("技能名称", text: $skill.name)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13.5, weight: .semibold))
-                        .lineLimit(1)
+                    HStack(spacing: 7) {
+                        TextField("技能名称", text: $skill.name)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .lineLimit(1)
+                        if skill.isBuiltIn {
+                            Text("内置技能")
+                                .font(.system(size: 8.5, weight: .medium))
+                                .foregroundStyle(.indigo)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.indigo.opacity(0.10), in: Capsule())
+                        }
+                    }
                     Text("更新于 \(skill.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                         .font(.system(size: 8.5))
                         .foregroundStyle(.tertiary)

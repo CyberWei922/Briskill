@@ -4,6 +4,7 @@ import SwiftUI
 struct SkillCreatorView: View {
     @ObservedObject private var settings = AISettingsStore.shared
     @ObservedObject private var skillStore = SkillStore.shared
+    @AppStorage("appAccent") private var appAccent = AppAccent.purple.rawValue
 
     @State private var executionMode: SkillExecutionMode = .localOnly
     @AppStorage("skillCreator.deepThinkingEnabled") private var deepThinkingEnabled = true
@@ -42,6 +43,7 @@ struct SkillCreatorView: View {
                 .frame(minWidth: 360, idealWidth: 470)
         }
         .background(.ultraThickMaterial)
+        .tint(AppAccent.resolve(appAccent).color)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {

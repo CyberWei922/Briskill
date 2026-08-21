@@ -7,6 +7,11 @@ enum SkillCreationMode: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum SkillOrigin: String, Codable {
+    case user
+    case builtIn
+}
+
 enum SkillExecutionMode: String, Codable, CaseIterable, Identifiable {
     case localOnly
     case cloudAssisted
@@ -307,6 +312,8 @@ struct UserSkill: Codable, Identifiable {
     var createdAt: Date
     var updatedAt: Date
     var isEnabled: Bool
+    var origin: SkillOrigin?
+    var builtInIdentifier: String?
 
     init(draft: SkillDraft, request: SkillCreationRequest, generatedBy: String) {
         id = UUID()
@@ -335,6 +342,54 @@ struct UserSkill: Codable, Identifiable {
         createdAt = Date()
         updatedAt = Date()
         isEnabled = true
+        origin = .user
+        builtInIdentifier = nil
+    }
+
+    init(
+        builtInIdentifier: String,
+        id: UUID,
+        name: String,
+        keyword: String,
+        aliases: [String],
+        summary: String,
+        actions: [String],
+        output: String,
+        requiredTools: [String],
+        permissions: [String],
+        executionMode: SkillExecutionMode,
+        parameters: [SkillParameterDefinition] = [],
+        workflow: [SkillWorkflowStep],
+        modelTask: SkillModelTask? = nil,
+        dataDisclosure: [String] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.aliases = Array(Set([keyword] + aliases))
+        registeredKeyword = keyword
+        self.summary = summary
+        originalRequest = summary
+        creationMode = .guided
+        trigger = "输入 \(keyword)" + (parameters.isEmpty ? "" : "，并提供所需参数")
+        condition = nil
+        self.actions = actions
+        fallback = "执行失败时显示具体错误，不进行未授权的替代操作"
+        self.output = output
+        explanation = summary + " 这是随软件提供的可编辑默认技能；它与用户技能使用相同格式，可以关闭、修改、导出或删除。"
+        self.requiredTools = requiredTools
+        self.permissions = permissions
+        self.executionMode = executionMode
+        self.workflow = workflow
+        self.modelTask = modelTask
+        networkHosts = []
+        self.dataDisclosure = dataDisclosure
+        self.parameters = parameters
+        generatedBy = "Local Assistant"
+        createdAt = Date(timeIntervalSince1970: 1_787_225_600)
+        updatedAt = createdAt
+        isEnabled = true
+        origin = .builtIn
+        self.builtInIdentifier = builtInIdentifier
     }
 
     var searchTerms: [String] {
@@ -347,6 +402,10 @@ struct UserSkill: Codable, Identifiable {
 
     var resolvedParameters: [SkillParameterDefinition] {
         parameters ?? []
+    }
+
+    var isBuiltIn: Bool {
+        origin == .builtIn || builtInIdentifier != nil
     }
 
     var executionExample: String {

@@ -9,6 +9,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     private var panel: AssistantPanel?
     private let inputSourceSession = KeyboardInputSourceSession()
     private var isInteractionPinned = false
+    private var isPerformingSystemInteraction = false
 
     func toggle() {
         if panel?.isVisible == true {
@@ -21,6 +22,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        SelectionContextStore.shared.captureBeforePanelActivation()
         let panel = panel ?? makePanel()
         self.panel = panel
 
@@ -42,6 +44,18 @@ final class PanelController: NSObject, NSWindowDelegate {
             pinned ? "快捷面板已临时固定，可从 Finder 拖入文件" : "快捷面板已恢复失焦自动隐藏",
             category: "Panel"
         )
+    }
+
+    func hideForSystemInteraction() {
+        isPerformingSystemInteraction = true
+        panel?.orderOut(nil)
+        AppConsole.shared.info("快捷面板为系统交互临时隐藏", category: "Panel")
+    }
+
+    func restoreAfterSystemInteraction() {
+        guard isPerformingSystemInteraction else { return }
+        isPerformingSystemInteraction = false
+        show()
     }
 
     private func makePanel() -> AssistantPanel {
@@ -74,6 +88,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             return
         }
         guard !isInteractionPinned else { return }
+        guard !isPerformingSystemInteraction else { return }
         inputSourceSession.restore()
         window.orderOut(nil)
         AppConsole.shared.info("快捷面板失去焦点并隐藏", category: "Panel")
@@ -157,6 +172,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.title = "Local Assistant 设置"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.isOpaque = false
+        window.backgroundColor = .clear
         window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .automatic
         window.isMovableByWindowBackground = true

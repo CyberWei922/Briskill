@@ -235,27 +235,32 @@ final class SkillGenerationService {
             当前模式：localOnly（本地执行）。
 
             允许的工具注册表：
-            - clipboard.readText：读取剪贴板纯文本。
-            - clipboard.writeText：写入剪贴板纯文本。
-            - files.list、files.search、files.rename、files.move：只操作用户授权目录。
-            - system.metricsSnapshot、process.topConsumers：读取系统诊断信息。
-            - ocr.recognize：使用本机 Apple Vision 识别图片文字。
-            - network.request：通过本机网络访问用户确认的目标；必须声明协议、主机、用途和请求方法。
-            - notification.show：发送本地通知。
+            - clipboard.readText，arguments={}：读取剪贴板纯文本。
+            - clipboard.writeText，arguments={"text":"$前一步输出"}：写入剪贴板纯文本。
+            - selection.readText，arguments={}：读取用户在其他应用中选中的文字；需要 accessibility。
+            - selection.replaceText，arguments={"text":"$前一步输出"}：经用户原生确认后替换选中文字；需要 accessibility 和 confirmation_required。
+            - screen.captureRegion，arguments={}：让用户框选屏幕区域并返回图片路径；需要 screen_recording。
+            - image.ocr，arguments={"path":"{{图片}}"}：使用本机 Apple Vision 识别图片文字。
+            - file.readText，arguments={"path":"{{文件}}"}：读取文本、代码、RTF 或含文字层的 PDF。
+            - file.list，arguments={"directory":"{{文件夹}}","limit":50}：列出用户选择目录中的项目。
+            - file.search，arguments={"query":"{{文件名}}","directory":"可选用户目录","limit":30}：按名称有界搜索文件。
+            - file.rename，arguments={"path":"{{文件}}","newName":"{{新名称}}"}：经用户原生确认后重命名，不覆盖现有文件。
+            - file.move，arguments={"path":"{{文件}}","destination":"{{目标文件夹}}"}：经用户原生确认后移动，不覆盖现有文件。
+            - file.trash，arguments={"path":"{{文件}}"}：经用户原生确认后移到 macOS 废纸篓。
+            - system.snapshot，arguments={}：读取诊断所需的系统、磁盘、温度和高占用进程快照。
 
             强制要求：
             - executionMode 必须为 localOnly。
             - modelTask 必须为 null。
             - workflow 和 requiredTools 禁止出现任何 model.* 或 cloud_api。
-            - 本地模式允许使用 network.request；使用时必须把目标写入 networkHosts，并声明网络用途。
-            - network.request 不得上传剪贴板、文件内容或其他私密数据，除非未来存在单独的数据授权机制；当前一律不得设计此类上传。
-            - dataDisclosure 通常为空；如果网络请求会暴露查询参数、主机名等信息，必须如实说明。
+            - 当前尚未注册通用 network.request、通知或任意脚本工具；需要这些能力时必须用 missing:能力 标记，不能伪造可执行工作流。
+            - dataDisclosure 通常为空。
             """
         case .cloudAssisted:
             return """
             当前模式：cloudAssisted（云端 AI 协同）。
 
-            除 localOnly 模式的本地与网络工具外，额外允许：
+            除 localOnly 模式中已经注册的本地工具外，额外允许：
             - model.generateText：调用用户配置的统一云端文本模型接口。
 
             强制要求：

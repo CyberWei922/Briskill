@@ -1,10 +1,30 @@
 import AppKit
+import ApplicationServices
 import Foundation
+import PDFKit
+import Vision
 
 struct WorkflowExecutionResult {
     let outputText: String
     let executedTools: [String]
     let didWriteClipboard: Bool
+}
+
+struct WorkflowExecutionProgress: Equatable {
+    let toolIdentifier: String
+    let completedSteps: Int
+    let totalSteps: Int
+    let toolFraction: Double?
+
+    var fractionCompleted: Double? {
+        guard totalSteps > 0 else { return nil }
+        if let toolFraction {
+            let clamped = min(max(toolFraction, 0), 1)
+            return min(max((Double(completedSteps) + clamped) / Double(totalSteps), 0), 1)
+        }
+        guard totalSteps > 1 || completedSteps > 0 else { return nil }
+        return min(max(Double(completedSteps) / Double(totalSteps), 0), 1)
+    }
 }
 
 enum WorkflowReadiness {
@@ -21,6 +41,15 @@ enum ToolExecutionError: LocalizedError {
     case localSkillRequestedCloudModel
     case unsupportedFileInput
     case emptyToolResult(String)
+    case accessibilityPermissionRequired
+    case noSelectedText
+    case invalidPath(String)
+    case unsupportedFileType(String)
+    case fileTooLarge(Int)
+    case fileOperationFailed(String)
+    case operationCancelled
+    case screenCaptureCancelled
+    case ocrFailed
 
     var errorDescription: String? {
         switch self {
@@ -40,6 +69,24 @@ enum ToolExecutionError: LocalizedError {
             "当前文本模型工具不会发送文件路径或文件内容；请先使用文件读取或 OCR 工具转换为文本。"
         case .emptyToolResult(let tool):
             "工具 \(tool) 没有返回可用结果。"
+        case .accessibilityPermissionRequired:
+            "需要“辅助功能”权限才能读取或替换其他应用中的选中文字。请在系统设置 → 隐私与安全性 → 辅助功能中允许 Local Assistant。"
+        case .noSelectedText:
+            "当前应用中没有可读取的选中文字，或者该应用不支持系统选区接口。"
+        case .invalidPath(let path):
+            "无法访问路径：\(path)"
+        case .unsupportedFileType(let type):
+            "暂不支持读取这种文件：\(type)"
+        case .fileTooLarge(let limitMB):
+            "文件过大。当前单个文件读取上限为 \(limitMB) MB。"
+        case .fileOperationFailed(let reason):
+            "文件操作失败：\(reason)"
+        case .operationCancelled:
+            "用户取消了操作。"
+        case .screenCaptureCancelled:
+            "没有完成区域截图。"
+        case .ocrFailed:
+            "没有从图片中识别到文字。"
         }
     }
 }
@@ -75,6 +122,7 @@ private struct ToolExecutionContext {
     let variables: [String: SkillJSONValue]
     let files: [String: [URL]]
     let modelPromptTemplate: String?
+    let reportProgress: ((Double?) -> Void)?
 }
 
 @MainActor
@@ -135,6 +183,662 @@ private final class ClipboardWriteTextTool: AssistantTool {
     }
 }
 
+private enum ToolPathResolver {
+    static func url(
+        from arguments: [String: SkillJSONValue],
+        keys: [String],
+        tool: String
+    ) throws -> URL {
+        guard let value = keys.compactMap({ arguments[$0]?.stringValue }).first,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolExecutionError.missingArgument(tool: tool, argument: keys.first ?? "path")
+        }
+        let expanded = (value as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expanded).standardizedFileURL
+    }
+
+    static func existingURL(
+        from arguments: [String: SkillJSONValue],
+        keys: [String],
+        tool: String
+    ) throws -> URL {
+        let url = try url(from: arguments, keys: keys, tool: tool)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw ToolExecutionError.invalidPath(url.path)
+        }
+        return url
+    }
+
+    static func validateMutableUserItem(_ url: URL) throws -> URL {
+        let resolved = url.resolvingSymlinksInPath().standardizedFileURL
+        let home = FileManager.default.homeDirectoryForCurrentUser
+            .resolvingSymlinksInPath().standardizedFileURL
+        guard resolved.path.hasPrefix(home.path + "/"),
+              resolved.path != home.path else {
+            throw ToolExecutionError.fileOperationFailed("只能修改当前用户主目录内的具体文件或文件夹")
+        }
+        let protected = ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Library"]
+            .map { home.appendingPathComponent($0).standardizedFileURL.path }
+        guard !protected.contains(resolved.path) else {
+            throw ToolExecutionError.fileOperationFailed("不能直接修改系统常用目录本身")
+        }
+        return resolved
+    }
+}
+
+private enum AccessibilityBridge {
+    static func selectedText(promptForPermission: Bool = true) throws -> String {
+        try selectionContext(promptForPermission: promptForPermission).text
+    }
+
+    static func selectionContext(promptForPermission: Bool = true) throws -> (element: AXUIElement, text: String) {
+        let element = try focusedElement(promptForPermission: promptForPermission)
+        var selectedValue: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextAttribute as CFString,
+            &selectedValue
+        )
+        guard status == .success,
+              let text = selectedValue as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolExecutionError.noSelectedText
+        }
+        return (element, text)
+    }
+
+    static func replaceSelectedText(with text: String, in capturedElement: AXUIElement? = nil) throws {
+        let element: AXUIElement
+        if let capturedElement {
+            element = capturedElement
+        } else {
+            element = try focusedElement(promptForPermission: true)
+        }
+        let status = AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextAttribute as CFString,
+            text as CFString
+        )
+        guard status == .success else {
+            throw ToolExecutionError.fileOperationFailed("当前应用不允许替换选中文字（AX 错误 \(status.rawValue)）")
+        }
+    }
+
+    private static func focusedElement(promptForPermission: Bool) throws -> AXUIElement {
+        if !AXIsProcessTrusted() {
+            if promptForPermission {
+                let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+                _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+            }
+            throw ToolExecutionError.accessibilityPermissionRequired
+        }
+
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedValue: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        )
+        guard status == .success, let focusedValue else {
+            throw ToolExecutionError.noSelectedText
+        }
+        return focusedValue as! AXUIElement
+    }
+}
+
+@MainActor
+final class SelectionContextStore {
+    static let shared = SelectionContextStore()
+
+    private var capturedText: String?
+    private var capturedElement: AXUIElement?
+    private var capturedAt: Date?
+
+    func captureBeforePanelActivation() {
+        guard AXIsProcessTrusted(),
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            return
+        }
+        if let context = try? AccessibilityBridge.selectionContext(promptForPermission: false) {
+            capturedText = context.text
+            capturedElement = context.element
+            capturedAt = Date()
+            AppConsole.shared.info("已暂存调用前的选中文字；字符数=\(context.text.count)", category: "Selection")
+        }
+    }
+
+    func recentText() -> String? {
+        guard let capturedText, let capturedAt,
+              Date().timeIntervalSince(capturedAt) < 60 else {
+            return nil
+        }
+        return capturedText
+    }
+
+    func replaceRecentText(with text: String) throws -> Bool {
+        guard let capturedElement, let capturedAt,
+              Date().timeIntervalSince(capturedAt) < 60 else {
+            return false
+        }
+        try AccessibilityBridge.replaceSelectedText(with: text, in: capturedElement)
+        capturedText = text
+        self.capturedAt = Date()
+        return true
+    }
+}
+
+@MainActor
+private enum NativeConfirmation {
+    static func approve(title: String, message: String, confirmTitle: String) -> Bool {
+        PanelController.shared.setInteractionPinned(true)
+        defer { PanelController.shared.setInteractionPinned(false) }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: confirmTitle)
+        alert.addButton(withTitle: "取消")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+}
+
+@MainActor
+private final class SelectionReadTextTool: AssistantTool {
+    let identifier = "selection.readText"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let text: String
+        if let captured = SelectionContextStore.shared.recentText() {
+            text = captured
+        } else {
+            text = try AccessibilityBridge.selectedText()
+        }
+        return ToolExecutionOutput(value: .string(text), displayText: text)
+    }
+}
+
+@MainActor
+private final class SelectionReplaceTextTool: AssistantTool {
+    let identifier = "selection.replaceText"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        guard let text = (arguments["text"] ?? arguments["input"])?.stringValue,
+              !text.isEmpty else {
+            throw ToolExecutionError.missingArgument(tool: identifier, argument: "text")
+        }
+        let preview = String(text.prefix(500))
+        guard NativeConfirmation.approve(
+            title: "替换当前选中文字？",
+            message: preview + (text.count > 500 ? "\n\n…其余内容已省略" : ""),
+            confirmTitle: "替换"
+        ) else {
+            throw ToolExecutionError.operationCancelled
+        }
+        if try !SelectionContextStore.shared.replaceRecentText(with: text) {
+            try AccessibilityBridge.replaceSelectedText(with: text)
+        }
+        return ToolExecutionOutput(value: .string(text), displayText: text)
+    }
+}
+
+@MainActor
+private final class ImageOCRTool: AssistantTool {
+    let identifier = "image.ocr"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let url = try ToolPathResolver.existingURL(
+            from: arguments,
+            keys: ["path", "image", "input"],
+            tool: identifier
+        )
+        let text = try await recognizeText(at: url, reportProgress: context.reportProgress)
+        guard !text.isEmpty else { throw ToolExecutionError.ocrFailed }
+        return ToolExecutionOutput(value: .string(text), displayText: text)
+    }
+
+    private func recognizeText(
+        at url: URL,
+        reportProgress: ((Double?) -> Void)?
+    ) async throws -> String {
+        guard let image = NSImage(contentsOf: url),
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw ToolExecutionError.unsupportedFileType(url.pathExtension.isEmpty ? url.lastPathComponent : url.pathExtension)
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = true
+                request.automaticallyDetectsLanguage = true
+                request.progressHandler = { _, fractionCompleted, _ in
+                    reportProgress?(fractionCompleted)
+                }
+                do {
+                    try VNImageRequestHandler(cgImage: cgImage).perform([request])
+                    let lines = (request.results ?? []).compactMap { observation in
+                        observation.topCandidates(1).first?.string
+                    }
+                    continuation.resume(returning: lines.joined(separator: "\n"))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private final class ScreenCaptureRegionTool: AssistantTool {
+    let identifier = "screen.captureRegion"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let capturesDirectory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+            .appendingPathComponent("LocalAssistant/Captures", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: capturesDirectory,
+            withIntermediateDirectories: true
+        )
+        let outputURL = capturesDirectory
+            .appendingPathComponent("capture-\(UUID().uuidString).png")
+
+        PanelController.shared.hideForSystemInteraction()
+        try? await Task.sleep(for: .milliseconds(180))
+        defer { PanelController.shared.restoreAfterSystemInteraction() }
+
+        let status = try await ProcessRunner.run(
+            executable: "/usr/sbin/screencapture",
+            arguments: ["-i", "-s", "-x", outputURL.path]
+        ).status
+        guard status == 0,
+              FileManager.default.fileExists(atPath: outputURL.path) else {
+            throw ToolExecutionError.screenCaptureCancelled
+        }
+        return ToolExecutionOutput(value: .string(outputURL.path), displayText: nil)
+    }
+}
+
+private enum ProcessRunner {
+    struct Result {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+    }
+
+    static func run(executable: String, arguments: [String]) async throws -> Result {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                let outputPipe = Pipe()
+                let errorPipe = Pipe()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
+                process.standardOutput = outputPipe
+                process.standardError = errorPipe
+                do {
+                    try process.run()
+                    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    continuation.resume(returning: Result(
+                        status: process.terminationStatus,
+                        stdout: String(data: outputData, encoding: .utf8) ?? "",
+                        stderr: String(data: errorData, encoding: .utf8) ?? ""
+                    ))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private final class FileReadTextTool: AssistantTool {
+    let identifier = "file.readText"
+    private let sizeLimit = 20 * 1_024 * 1_024
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let url = try ToolPathResolver.existingURL(
+            from: arguments,
+            keys: ["path", "file", "input"],
+            tool: identifier
+        )
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true else {
+            throw ToolExecutionError.invalidPath(url.path)
+        }
+        guard (values.fileSize ?? 0) <= sizeLimit else {
+            throw ToolExecutionError.fileTooLarge(20)
+        }
+
+        let text: String
+        switch url.pathExtension.lowercased() {
+        case "pdf":
+            guard let document = PDFDocument(url: url),
+                  let content = document.string,
+                  !content.isEmpty else {
+                throw ToolExecutionError.unsupportedFileType("PDF（可能是扫描件，请改用 OCR）")
+            }
+            text = content
+        case "rtf", "rtfd":
+            text = try NSAttributedString(
+                url: url,
+                options: [:],
+                documentAttributes: nil
+            ).string
+        case "txt", "md", "markdown", "json", "csv", "tsv", "xml", "yaml", "yml",
+             "swift", "m", "mm", "h", "c", "cc", "cpp", "py", "js", "ts", "tsx", "jsx",
+             "html", "css", "sql", "sh", "zsh", "log", "ini", "toml", "plist", "":
+            var encoding = String.Encoding.utf8
+            text = try String(contentsOf: url, usedEncoding: &encoding)
+        default:
+            throw ToolExecutionError.unsupportedFileType(url.pathExtension)
+        }
+
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolExecutionError.emptyToolResult(identifier)
+        }
+        return ToolExecutionOutput(value: .string(text), displayText: text)
+    }
+}
+
+@MainActor
+private final class FileListTool: AssistantTool {
+    let identifier = "file.list"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let directory: URL
+        if arguments["directory"] != nil || arguments["path"] != nil {
+            directory = try ToolPathResolver.existingURL(
+                from: arguments,
+                keys: ["directory", "path"],
+                tool: identifier
+            )
+        } else {
+            directory = FileManager.default.homeDirectoryForCurrentUser
+        }
+        let limit = max(1, min(arguments["limit"]?.integerValue ?? 50, 200))
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .prefix(limit)
+        let paths = urls.map(\.path)
+        let markdown = paths.isEmpty
+            ? "该目录为空。"
+            : paths.map { "- `\($0.replacingOccurrences(of: "`", with: "\\`"))`" }.joined(separator: "\n")
+        return ToolExecutionOutput(
+            value: .array(paths.map(SkillJSONValue.string)),
+            displayText: markdown
+        )
+    }
+}
+
+@MainActor
+private final class FileSearchTool: AssistantTool {
+    let identifier = "file.search"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        guard let query = (arguments["query"] ?? arguments["name"] ?? arguments["input"])?.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            throw ToolExecutionError.missingArgument(tool: identifier, argument: "query")
+        }
+        let limit = max(1, min(arguments["limit"]?.integerValue ?? 30, 100))
+        let roots: [URL]
+        if arguments["directory"] != nil || arguments["root"] != nil {
+            roots = [try ToolPathResolver.existingURL(
+                from: arguments,
+                keys: ["directory", "root"],
+                tool: identifier
+            )]
+        } else {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            roots = ["Desktop", "Documents", "Downloads"]
+                .map { home.appendingPathComponent($0, isDirectory: true) }
+                .filter { FileManager.default.fileExists(atPath: $0.path) }
+        }
+
+        let matches = try await search(query: query, roots: roots, limit: limit)
+        let markdown: String
+        if matches.isEmpty {
+            markdown = "没有找到名称包含“\(query)”的文件。"
+        } else {
+            markdown = matches.enumerated().map { index, url in
+                "\(index + 1). **\(url.lastPathComponent)**  \n   `\(url.path.replacingOccurrences(of: "`", with: "\\`"))`"
+            }.joined(separator: "\n")
+        }
+        return ToolExecutionOutput(
+            value: .array(matches.map { .string($0.path) }),
+            displayText: markdown
+        )
+    }
+
+    private func search(query: String, roots: [URL], limit: Int) async throws -> [URL] {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let manager = FileManager.default
+                var matches: [URL] = []
+                var inspected = 0
+                let normalizedQuery = query.folding(
+                    options: [.caseInsensitive, .diacriticInsensitive],
+                    locale: .current
+                )
+
+                rootLoop: for root in roots {
+                    guard let enumerator = manager.enumerator(
+                        at: root,
+                        includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+                        options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                        errorHandler: { _, _ in true }
+                    ) else { continue }
+
+                    for case let url as URL in enumerator {
+                        inspected += 1
+                        if inspected > 25_000 { break rootLoop }
+                        let name = url.lastPathComponent.folding(
+                            options: [.caseInsensitive, .diacriticInsensitive],
+                            locale: .current
+                        )
+                        if name.localizedStandardContains(normalizedQuery) {
+                            matches.append(url)
+                            if matches.count >= limit { break rootLoop }
+                        }
+                    }
+                }
+                continuation.resume(returning: matches)
+            }
+        }
+    }
+}
+
+@MainActor
+private final class FileRenameTool: AssistantTool {
+    let identifier = "file.rename"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let source = try ToolPathResolver.validateMutableUserItem(
+            ToolPathResolver.existingURL(from: arguments, keys: ["path", "source"], tool: identifier)
+        )
+        guard let newName = arguments["newName"]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+              !newName.isEmpty,
+              !newName.contains("/") else {
+            throw ToolExecutionError.missingArgument(tool: identifier, argument: "newName")
+        }
+        let destination = source.deletingLastPathComponent().appendingPathComponent(newName)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw ToolExecutionError.fileOperationFailed("目标名称已经存在")
+        }
+        guard NativeConfirmation.approve(
+            title: "重命名文件？",
+            message: "\(source.lastPathComponent)\n→\n\(newName)",
+            confirmTitle: "重命名"
+        ) else { throw ToolExecutionError.operationCancelled }
+        do {
+            try FileManager.default.moveItem(at: source, to: destination)
+        } catch {
+            throw ToolExecutionError.fileOperationFailed(error.localizedDescription)
+        }
+        return ToolExecutionOutput(value: .string(destination.path), displayText: "已重命名为 `\(newName)`")
+    }
+}
+
+@MainActor
+private final class FileMoveTool: AssistantTool {
+    let identifier = "file.move"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let source = try ToolPathResolver.validateMutableUserItem(
+            ToolPathResolver.existingURL(from: arguments, keys: ["path", "source"], tool: identifier)
+        )
+        let directory = try ToolPathResolver.existingURL(
+            from: arguments,
+            keys: ["destination", "directory", "to"],
+            tool: identifier
+        )
+        let destination = directory.appendingPathComponent(source.lastPathComponent)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw ToolExecutionError.fileOperationFailed("目标位置已经存在同名项目")
+        }
+        guard NativeConfirmation.approve(
+            title: "移动文件？",
+            message: "\(source.path)\n→\n\(destination.path)",
+            confirmTitle: "移动"
+        ) else { throw ToolExecutionError.operationCancelled }
+        do {
+            try FileManager.default.moveItem(at: source, to: destination)
+        } catch {
+            throw ToolExecutionError.fileOperationFailed(error.localizedDescription)
+        }
+        return ToolExecutionOutput(value: .string(destination.path), displayText: "已移动到 `\(destination.path)`")
+    }
+}
+
+@MainActor
+private final class FileTrashTool: AssistantTool {
+    let identifier = "file.trash"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let source = try ToolPathResolver.validateMutableUserItem(
+            ToolPathResolver.existingURL(from: arguments, keys: ["path", "source"], tool: identifier)
+        )
+        guard NativeConfirmation.approve(
+            title: "移到废纸篓？",
+            message: source.path,
+            confirmTitle: "移到废纸篓"
+        ) else { throw ToolExecutionError.operationCancelled }
+        var resultingURL: NSURL?
+        do {
+            try FileManager.default.trashItem(at: source, resultingItemURL: &resultingURL)
+        } catch {
+            throw ToolExecutionError.fileOperationFailed(error.localizedDescription)
+        }
+        let result = (resultingURL as URL?)?.path ?? source.path
+        return ToolExecutionOutput(value: .string(result), displayText: "已将 `\(source.lastPathComponent)` 移到废纸篓。")
+    }
+}
+
+@MainActor
+private final class SystemSnapshotTool: AssistantTool {
+    let identifier = "system.snapshot"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        let processInfo = ProcessInfo.processInfo
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let disk = try? home.resourceValues(forKeys: [
+            .volumeTotalCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey
+        ])
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .memory
+        let physicalMemory = formatter.string(fromByteCount: Int64(processInfo.physicalMemory))
+        let totalDisk = formatter.string(fromByteCount: Int64(disk?.volumeTotalCapacity ?? 0))
+        let availableDisk = formatter.string(fromByteCount: disk?.volumeAvailableCapacityForImportantUsage ?? 0)
+        let topProcesses = await topProcessSummary()
+        let thermal: String
+        switch processInfo.thermalState {
+        case .nominal: thermal = "正常"
+        case .fair: thermal = "轻度升温"
+        case .serious: thermal = "较高"
+        case .critical: thermal = "严重"
+        @unknown default: thermal = "未知"
+        }
+        let uptimeHours = Int(processInfo.systemUptime / 3_600)
+        let markdown = """
+        ## 系统快照
+
+        - **处理器核心**：\(processInfo.processorCount)
+        - **物理内存**：\(physicalMemory)
+        - **磁盘空间**：可用 \(availableDisk) / 总计 \(totalDisk)
+        - **温度状态**：\(thermal)
+        - **连续运行**：约 \(uptimeHours) 小时
+
+        ## 当前资源占用靠前的进程
+
+        \(topProcesses)
+        """
+        return ToolExecutionOutput(value: .string(markdown), displayText: markdown)
+    }
+
+    private func topProcessSummary() async -> String {
+        guard let result = try? await ProcessRunner.run(
+            executable: "/bin/ps",
+            arguments: ["-Ao", "pid=,pcpu=,pmem=,comm=", "-r"]
+        ), result.status == 0 else {
+            return "暂时无法读取进程列表。"
+        }
+        let lines = result.stdout
+            .split(separator: "\n")
+            .prefix(8)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        return lines.isEmpty
+            ? "没有进程数据。"
+            : lines.map { "- `\($0)`" }.joined(separator: "\n")
+    }
+}
+
 @MainActor
 private final class ModelGenerateTextTool: AssistantTool {
     let identifier = "model.generateText"
@@ -143,10 +847,6 @@ private final class ModelGenerateTextTool: AssistantTool {
         arguments: [String: SkillJSONValue],
         context: ToolExecutionContext
     ) async throws -> ToolExecutionOutput {
-        guard context.files.values.allSatisfy(\.isEmpty) else {
-            throw ToolExecutionError.unsupportedFileInput
-        }
-
         let explicitInput = (arguments["input"] ?? arguments["prompt"])?.stringValue ?? ""
         var prompt = context.modelPromptTemplate
             ?? arguments["prompt"]?.stringValue
@@ -294,6 +994,17 @@ final class ToolRegistry {
         let clipboard = SystemClipboardAccess()
         register(ClipboardReadTextTool(clipboard: clipboard))
         register(ClipboardWriteTextTool(clipboard: clipboard))
+        register(SelectionReadTextTool())
+        register(SelectionReplaceTextTool())
+        register(ScreenCaptureRegionTool())
+        register(ImageOCRTool())
+        register(FileReadTextTool())
+        register(FileListTool())
+        register(FileSearchTool())
+        register(FileRenameTool())
+        register(FileMoveTool())
+        register(FileTrashTool())
+        register(SystemSnapshotTool())
         register(ModelGenerateTextTool())
     }
 
@@ -308,6 +1019,28 @@ final class ToolRegistry {
             return "clipboard.readText"
         case "clipboard.write", "clipboard.writetext":
             return "clipboard.writeText"
+        case "selection", "selection.read", "selection.readtext", "selectedtext.read":
+            return "selection.readText"
+        case "selection.replace", "selection.replacetext", "selectedtext.replace":
+            return "selection.replaceText"
+        case "screen.capture", "screen.captureregion", "screenshot.capture":
+            return "screen.captureRegion"
+        case "ocr", "ocr.recognize", "image.ocr", "vision.ocr":
+            return "image.ocr"
+        case "file.read", "file.readtext", "files.read", "files.readtext":
+            return "file.readText"
+        case "file.list", "files.list":
+            return "file.list"
+        case "file.search", "files.search":
+            return "file.search"
+        case "file.rename", "files.rename":
+            return "file.rename"
+        case "file.move", "files.move":
+            return "file.move"
+        case "file.trash", "files.trash", "file.delete", "files.delete":
+            return "file.trash"
+        case "system.snapshot", "system.metricssnapshot", "system.metrics", "process.topconsumers":
+            return "system.snapshot"
         case "model", "model.generatetext", "text.generation", "translate", "summarize", "rewrite":
             return "model.generateText"
         default:
@@ -365,11 +1098,9 @@ final class WorkflowEngine {
         skill: UserSkill,
         input: String,
         values: [String: String],
-        files: [String: [URL]]
+        files: [String: [URL]],
+        progress: ((WorkflowExecutionProgress) -> Void)? = nil
     ) async throws -> WorkflowExecutionResult {
-        guard files.values.allSatisfy(\.isEmpty) else {
-            throw ToolExecutionError.unsupportedFileInput
-        }
         guard let workflow = executableWorkflow(for: skill), !workflow.steps.isEmpty else {
             throw ToolExecutionError.missingWorkflow
         }
@@ -394,13 +1125,34 @@ final class WorkflowEngine {
                 throw ToolExecutionError.localSkillRequestedCloudModel
             }
 
+            progress?(
+                WorkflowExecutionProgress(
+                    toolIdentifier: canonicalID,
+                    completedSteps: index,
+                    totalSteps: workflow.steps.count,
+                    toolFraction: nil
+                )
+            )
+
             let arguments = step.arguments.mapValues { resolve($0, variables: variables) }
             let context = ToolExecutionContext(
                 skill: skill,
                 userInput: input,
                 variables: variables,
                 files: files,
-                modelPromptTemplate: workflow.modelPromptTemplate
+                modelPromptTemplate: workflow.modelPromptTemplate,
+                reportProgress: { toolFraction in
+                    Task { @MainActor in
+                        progress?(
+                            WorkflowExecutionProgress(
+                                toolIdentifier: canonicalID,
+                                completedSteps: index,
+                                totalSteps: workflow.steps.count,
+                                toolFraction: toolFraction
+                            )
+                        )
+                    }
+                }
             )
             let startedAt = Date()
             AppConsole.shared.info(
@@ -428,6 +1180,14 @@ final class WorkflowEngine {
                 if canonicalID == "clipboard.writeText" {
                     didWriteClipboard = true
                 }
+                progress?(
+                    WorkflowExecutionProgress(
+                        toolIdentifier: canonicalID,
+                        completedSteps: index,
+                        totalSteps: workflow.steps.count,
+                        toolFraction: 1
+                    )
+                )
             } catch {
                 let elapsed = Int(Date().timeIntervalSince(startedAt) * 1_000)
                 AppConsole.shared.error(
