@@ -39,6 +39,15 @@ final class InvocationHistoryStore: ObservableObject {
         AppConsole.shared.warning("调用历史已删除：\(record.title)", category: "History")
     }
 
+    func delete(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        let previousCount = records.count
+        records.removeAll { ids.contains($0.id) }
+        let deletedCount = previousCount - records.count
+        persist()
+        AppConsole.shared.warning("批量删除了 \(deletedCount) 条调用历史", category: "History")
+    }
+
     func clear() {
         records.removeAll()
         persist()

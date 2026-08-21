@@ -45,7 +45,7 @@ final class AIService {
         prompt: String,
         system: String? = nil,
         provider: AIProvider? = nil,
-        maxTokens: Int = 900,
+        maxTokens: Int? = nil,
         expectsJSON: Bool = false
     ) async throws -> String {
         let provider = provider ?? settings.selectedProvider
@@ -100,6 +100,10 @@ final class AIService {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                AppConsole.shared.info("[\(requestID)] 请求已由用户终止", category: "AI")
+                throw CancellationError()
+            }
             logger.error("[\(requestID, privacy: .public)] 网络请求失败：\(error.localizedDescription, privacy: .public)")
             AppConsole.shared.error("[\(requestID)] 网络请求失败：\(error.localizedDescription)", category: "AI")
             throw error
@@ -135,8 +139,12 @@ final class AIService {
             AppConsole.shared.error("[\(requestID)] 响应无最终文字：\(details)", category: "AI")
             throw AIServiceError.emptyResponse(details)
         }
-        logger.notice("[\(requestID, privacy: .public)] 请求成功，返回 \(text.count) 个字符")
-        AppConsole.shared.success("[\(requestID)] 请求成功；返回 \(text.count) 个字符", category: "AI")
+        let diagnostics = responseDiagnostics(from: data, provider: provider)
+        logger.notice("[\(requestID, privacy: .public)] 请求成功，返回 \(text.count) 个字符；\(diagnostics, privacy: .public)")
+        AppConsole.shared.success(
+            "[\(requestID)] 请求成功；返回 \(text.count) 个字符；\(diagnostics)",
+            category: "AI"
+        )
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -440,7 +448,7 @@ final class AIService {
         apiKey: String,
         prompt: String,
         system: String?,
-        maxTokens: Int,
+        maxTokens: Int?,
         expectsJSON: Bool
     ) throws -> URLRequest {
         let url = try endpointURL(configuration.endpoint, path: "chat/completions")
@@ -454,9 +462,11 @@ final class AIService {
             "model": configuration.model,
             "messages": messages,
             "temperature": 0.2,
-            "max_tokens": maxTokens,
             "stream": false
         ]
+        if let maxTokens {
+            body["max_tokens"] = maxTokens
+        }
         if provider == .deepSeek || provider == .glm {
             body["thinking"] = ["type": "disabled"]
         }
@@ -471,19 +481,21 @@ final class AIService {
         apiKey: String,
         prompt: String,
         system: String?,
-        maxTokens: Int,
+        maxTokens: Int?,
         expectsJSON: Bool
     ) throws -> URLRequest {
         let model = configuration.model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? configuration.model
         let url = try endpointURL(configuration.endpoint, path: "models/\(model):generateContent")
         var generationConfig: [String: Any] = [
             "temperature": 0.2,
-            "maxOutputTokens": maxTokens,
             "thinkingConfig": geminiThinkingConfig(
                 model: configuration.model,
                 enabled: false
             )
         ]
+        if let maxTokens {
+            generationConfig["maxOutputTokens"] = maxTokens
+        }
         if expectsJSON {
             generationConfig["responseMimeType"] = "application/json"
         }
@@ -508,14 +520,16 @@ final class AIService {
         apiKey: String,
         prompt: String,
         system: String?,
-        maxTokens: Int
+        maxTokens: Int?
     ) throws -> URLRequest {
         let url = try endpointURL(configuration.endpoint, path: "responses")
         var body: [String: Any] = [
             "model": configuration.model,
-            "input": prompt,
-            "max_output_tokens": maxTokens
+            "input": prompt
         ]
+        if let maxTokens {
+            body["max_output_tokens"] = maxTokens
+        }
         if let system, !system.isEmpty {
             body["instructions"] = system
         }

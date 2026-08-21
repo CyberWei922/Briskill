@@ -223,7 +223,7 @@ final class SkillGenerationService {
     - 不要把声明字段重复嵌套到 arguments。生成前自行检查 workflow 每个步骤只含 id、tool、arguments、saveAs 四个字段。
     - parameters 必须原样保留用户定义的参数数量、名称、类型与必填状态，不得把文件或图片降级成普通文本。
     - workflow 和 modelTask 通过 {{参数名称}} 引用对应运行时参数；仅在确实需要整条原始输入时使用 {{userInput}}。
-    - 文件操作只能使用用户授权路径；修改、移动、发送等操作必须在 permissions 中声明确认要求。
+    - 文件操作只能使用用户授权路径；修改、删除、发送等操作必须在 permissions 中声明确认要求。
     - 网络访问不等于云端大模型调用。经过授权的本地网络工具可以联网，但必须声明具体目标和用途。
     - actions 是给用户阅读的自然语言步骤；workflow 是给执行器读取的结构化步骤，两者必须一致。
     """
@@ -245,7 +245,7 @@ final class SkillGenerationService {
             - file.list，arguments={"directory":"{{文件夹}}","limit":50}：列出用户选择目录中的项目。
             - file.search，arguments={"query":"{{文件名}}","directory":"可选用户目录","limit":30}：按名称有界搜索文件。
             - file.rename，arguments={"path":"{{文件}}","newName":"{{新名称}}"}：经用户原生确认后重命名，不覆盖现有文件。
-            - file.move，arguments={"path":"{{文件}}","destination":"{{目标文件夹}}"}：经用户原生确认后移动，不覆盖现有文件。
+            - file.createEmpty，arguments={"name":"{{名称.后缀}}"}：在用户下载目录创建空文件；文件名必须带后缀且不能包含路径。
             - file.trash，arguments={"path":"{{文件}}"}：经用户原生确认后移到 macOS 废纸篓。
             - system.snapshot，arguments={}：读取诊断所需的系统、磁盘、温度和高占用进程快照。
 

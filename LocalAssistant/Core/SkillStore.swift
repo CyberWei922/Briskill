@@ -39,6 +39,7 @@ final class SkillStore: ObservableObject {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let deletedBuiltInsKey = "skills.deletedBuiltInIdentifiers"
+    private let retiredBuiltInIdentifiers: Set<String> = ["builtin.file.move"]
 
     private init() {
         encoder = JSONEncoder()
@@ -47,6 +48,7 @@ final class SkillStore: ObservableObject {
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         load()
+        removeRetiredBuiltInSkills()
         seedBuiltInSkillsIfNeeded()
     }
 
@@ -157,6 +159,22 @@ final class SkillStore: ObservableObject {
         }
         set {
             UserDefaults.standard.set(Array(newValue).sorted(), forKey: deletedBuiltInsKey)
+        }
+    }
+
+    private func removeRetiredBuiltInSkills() {
+        let previousSkills = skills
+        let previousCount = skills.count
+        skills.removeAll { skill in
+            skill.builtInIdentifier.map(retiredBuiltInIdentifiers.contains) == true
+        }
+        guard skills.count != previousCount else { return }
+        do {
+            try persist()
+            AppConsole.shared.info("已移除不再提供的内置移动文件技能", category: "SkillStore")
+        } catch {
+            skills = previousSkills
+            AppConsole.shared.error("清理旧内置技能失败：\(error.localizedDescription)", category: "SkillStore")
         }
     }
 
@@ -400,22 +418,19 @@ private enum BuiltInSkillCatalog {
             workflow: [step("rename", "file.rename", ["path": .string("{{文件}}"), "newName": .string("{{新名称}}")], saveAs: "newPath")]
         ),
         make(
-            number: 13,
-            identifier: "builtin.file.move",
-            name: "移动文件",
-            keyword: "move",
-            aliases: ["移动本地文件", "move file"],
-            summary: "在用户确认后把所选文件移动到目标文件夹。",
-            actions: ["接收文件和目标文件夹", "显示原生确认框", "确认后移动文件"],
-            output: "显示移动后的完整路径",
-            requiredTools: ["file.move"],
-            permissions: ["user_selected_file", "user_selected_folder", "confirmation_required"],
+            number: 16,
+            identifier: "builtin.file.create-empty",
+            name: "新建空文件",
+            keyword: "new",
+            aliases: ["新建文件", "create file"],
+            summary: "按给定的完整文件名在下载目录创建一个空文件。",
+            actions: ["接收带后缀的文件名", "在下载目录创建空文件", "显示可拖拽的文件卡片"],
+            output: "显示新文件，可拖动、双击打开或移到废纸篓",
+            requiredTools: ["file.createEmpty"],
+            permissions: ["downloads_write"],
             executionMode: .localOnly,
-            parameters: [
-                parameter("file", "文件", .file, "要移动的文件"),
-                parameter("destination", "目标文件夹", .folder, "文件要移动到的文件夹")
-            ],
-            workflow: [step("move", "file.move", ["path": .string("{{文件}}"), "destination": .string("{{目标文件夹}}")], saveAs: "newPath")]
+            parameters: [parameter("name", "名称.后缀", .text, "例如 1.txt、notes.md 或 script.py")],
+            workflow: [step("create", "file.createEmpty", ["name": .string("{{名称.后缀}}")], saveAs: "createdFile")]
         ),
         make(
             number: 14,

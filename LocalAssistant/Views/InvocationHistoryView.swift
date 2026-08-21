@@ -1,35 +1,19 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct InvocationHistorySettingsView: View {
     @ObservedObject private var history = InvocationHistoryStore.shared
-    @State private var searchText = ""
+    @Binding var searchText: String
     @State private var selectedRecord: InvocationRecord?
     @State private var recordPendingDeletion: InvocationRecord?
     @State private var isConfirmingClear = false
+    @State private var isSelecting = false
+    @State private var selectedRecordIDs: Set<UUID> = []
+    @State private var isConfirmingBatchDelete = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("搜索调用、技能或结果", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 11)
-            .frame(height: 36)
-            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-
+        ZStack(alignment: .bottomTrailing) {
             if filteredRecords.isEmpty {
                 ContentUnavailableView(
                     searchText.isEmpty ? "还没有调用记录" : "没有匹配的记录",
@@ -37,41 +21,59 @@ struct InvocationHistorySettingsView: View {
                     description: Text(searchText.isEmpty ? "在悬浮窗运行问答或技能后，输入、结果和真实工具步骤会保存在这里。" : "尝试搜索输入内容、技能名称或执行结果。")
                 )
             } else {
-                List(filteredRecords) { record in
-                    Button {
-                        selectedRecord = record
-                    } label: {
-                        InvocationHistoryRow(record: record)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(filteredRecords.enumerated()), id: \.element.id) { index, record in
+                            Button {
+                                if isSelecting {
+                                    toggleSelection(for: record.id)
+                                } else {
+                                    selectedRecord = record
+                                }
+                            } label: {
+                                InvocationHistoryRow(
+                                    record: record,
+                                    isSelecting: isSelecting,
+                                    isSelected: selectedRecordIDs.contains(record.id)
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                if !isSelecting {
+                                    Button("查看详情") { selectedRecord = record }
+                                    Divider()
+                                    Button("删除", role: .destructive) { recordPendingDeletion = record }
+                                }
+                            }
+
+                            if index + 1 < filteredRecords.count {
+                                Divider()
+                                    .padding(.leading, 56)
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("查看详情") { selectedRecord = record }
-                        Divider()
-                        Button("删除", role: .destructive) { recordPendingDeletion = record }
+                    .background(
+                        Color.primary.opacity(0.045),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.055), lineWidth: 0.7)
                     }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+                    .padding(.bottom, 72)
                 }
-                .listStyle(.inset)
             }
 
-            Divider()
-
-            HStack {
-                Text("记录仅保存在这台 Mac 的 Application Support 中。")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Text("\(history.records.count) 条记录")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-                Button("全部清空", role: .destructive) {
-                    isConfirmingClear = true
-                }
-                .disabled(history.records.isEmpty)
-            }
-            .padding(.horizontal, 20)
-            .frame(height: 44)
+            historyFloatingControls
+                .padding(18)
+        }
+        .background(Color.settingsPaneBackground)
+        .onChange(of: history.records.map(\.id)) {
+            selectedRecordIDs.formIntersection(Set(history.records.map(\.id)))
         }
         .sheet(item: $selectedRecord) { record in
             InvocationHistoryDetail(record: record) {
@@ -101,6 +103,55 @@ struct InvocationHistorySettingsView: View {
         } message: {
             Text("这会永久删除全部 \(history.records.count) 条本地调用记录，技能和生成历史不会受影响。")
         }
+        .alert("删除选中的 \(selectedRecordIDs.count) 条记录？", isPresented: $isConfirmingBatchDelete) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                history.delete(ids: selectedRecordIDs)
+                leaveSelectionMode()
+            }
+        } message: {
+            Text("删除后无法恢复。")
+        }
+    }
+
+    private var historyFloatingControls: some View {
+        HStack(spacing: 8) {
+            if isSelecting {
+                SettingsFloatingActionButton(title: "取消", symbol: "xmark") {
+                    leaveSelectionMode()
+                }
+                SettingsFloatingActionButton(
+                    title: "导出 \(selectedRecordIDs.count) 条",
+                    symbol: "square.and.arrow.up.on.square",
+                    disabled: selectedRecordIDs.isEmpty,
+                    action: exportSelectedRecords
+                )
+                SettingsFloatingActionButton(
+                    title: "删除 \(selectedRecordIDs.count) 条",
+                    symbol: "trash",
+                    tint: .red,
+                    disabled: selectedRecordIDs.isEmpty
+                ) {
+                    isConfirmingBatchDelete = true
+                }
+            } else {
+                SettingsFloatingActionButton(
+                    title: "全部清空",
+                    symbol: "trash",
+                    tint: .red,
+                    disabled: history.records.isEmpty
+                ) {
+                    isConfirmingClear = true
+                }
+                SettingsFloatingActionButton(
+                    title: "多选",
+                    symbol: "checkmark.circle",
+                    disabled: history.records.isEmpty
+                ) {
+                    isSelecting = true
+                }
+            }
+        }
     }
 
     private var filteredRecords: [InvocationRecord] {
@@ -112,10 +163,54 @@ struct InvocationHistorySettingsView: View {
                 || record.tools.contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
+
+    private var selectedRecords: [InvocationRecord] {
+        history.records.filter { selectedRecordIDs.contains($0.id) }
+    }
+
+    private func toggleSelection(for id: UUID) {
+        if selectedRecordIDs.contains(id) {
+            selectedRecordIDs.remove(id)
+        } else {
+            selectedRecordIDs.insert(id)
+        }
+    }
+
+    private func leaveSelectionMode() {
+        isSelecting = false
+        selectedRecordIDs.removeAll()
+    }
+
+    private func exportSelectedRecords() {
+        let records = selectedRecords
+        guard !records.isEmpty else { return }
+
+        let panel = NSSavePanel()
+        panel.title = "导出调用历史"
+        panel.prompt = "导出"
+        panel.nameFieldStringValue = "LocalAssistant-History-\(Date.now.formatted(.iso8601.year().month().day())).json"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(records)
+                try data.write(to: url, options: .atomic)
+                AppConsole.shared.success("导出 \(records.count) 条调用历史到：\(url.path)", category: "History")
+            } catch {
+                AppConsole.shared.error("调用历史导出失败：\(error.localizedDescription)", category: "History")
+            }
+        }
+    }
 }
 
 private struct InvocationHistoryRow: View {
     let record: InvocationRecord
+    let isSelecting: Bool
+    let isSelected: Bool
 
     var body: some View {
         HStack(spacing: 11) {
@@ -150,8 +245,21 @@ private struct InvocationHistoryRow: View {
                     .font(.system(size: 9, design: .rounded))
                     .foregroundStyle(.quaternary)
             }
+
+            if isSelecting {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.55))
+                    .padding(.leading, 4)
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 4)
+            }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
     }
 
     private var statusColor: Color {
@@ -239,8 +347,10 @@ private struct InvocationHistoryDetail: View {
             }
             .padding(.horizontal, 22)
             .frame(height: 52)
+            .background(Color.settingsPaneBackground)
         }
         .frame(width: 620, height: 540)
+        .background(Color.settingsPaneBackground)
     }
 
     private func historySection<Content: View>(

@@ -26,6 +26,7 @@ struct AssistantPanelView: View {
     @State private var executionActivity: PanelExecutionActivity?
     @State private var pendingInvocationOptions = InvocationOptions.standard
     @State private var activeInvocationOptions = InvocationOptions.standard
+    @State private var activeInputParameterID: String?
 
     var body: some View {
         panelContent
@@ -44,20 +45,40 @@ struct AssistantPanelView: View {
             .frame(minWidth: 720, minHeight: 450)
             .tint(accentColor)
             .onAppear {
-                DispatchQueue.main.async {
-                    searchIsFocused = true
-                }
+                focusSearchField()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .assistantPanelShouldFocusSearch)) { _ in
+                focusSearchField()
+                restoreInputSourceForCurrentStage()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .assistantPanelShouldCancelGeneration)) { _ in
+                stopActiveGeneration()
+            }
+            .onChange(of: isThinking) { _, isActive in
+                PanelController.shared.setGenerationActive(isActive)
             }
             .onChange(of: prompt) { oldValue, newValue in
                 handlePromptChange(from: oldValue, to: newValue)
             }
             .onDisappear {
                 PanelController.shared.setInteractionPinned(false)
+                PanelController.shared.setGenerationActive(false)
             }
     }
 
     private var panelShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: 34, style: .continuous)
+    }
+
+    private func focusSearchField() {
+        // The SwiftUI focus value can remain true after NSPanel.orderOut even
+        // though AppKit has discarded the actual first responder. Toggling it
+        // off first guarantees that the next assignment performs a real focus
+        // transition instead of being optimized away as an unchanged value.
+        searchIsFocused = false
+        DispatchQueue.main.async {
+            searchIsFocused = true
+        }
     }
 
     private var accentColor: Color {
@@ -170,6 +191,7 @@ struct AssistantPanelView: View {
                     Button {
                         parameterFiles[attachedFile.parameter.id] = []
                         externallySuppliedFileParameterIDs.remove(attachedFile.parameter.id)
+                        synchronizeInputSourceWithNextParameter()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.tertiary)
@@ -201,44 +223,48 @@ struct AssistantPanelView: View {
                 .help("添加\(fileParameter.type.displayName)")
             }
 
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(serviceStatusIsAvailable ? Color.green : Color.secondary)
-                    .frame(width: 6, height: 6)
-                Text(serviceStatusLabel)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
+            if !isThinking {
+                Button {
+                    executeCurrentInput()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(canExecuteCurrentState ? accentColor : Color.secondary.opacity(0.38))
+                        .frame(width: 30, height: 30)
+                        .background(
+                            canExecuteCurrentState ? accentColor.opacity(0.11) : Color.clear,
+                            in: Circle()
+                        )
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canExecuteCurrentState)
+                .help("搜索或执行")
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.055), in: Capsule())
 
-            Button {
-                executeCurrentInput()
-            } label: {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(canExecuteCurrentState ? accentColor : Color.secondary.opacity(0.38))
-                    .frame(width: 28, height: 28)
-                    .background(
-                        canExecuteCurrentState ? accentColor.opacity(0.11) : Color.clear,
-                        in: Circle()
-                    )
-                    .contentShape(Circle())
-                    .symbolEffect(.pulse, isActive: isThinking)
-            }
-            .buttonStyle(.plain)
-            .disabled(!canExecuteCurrentState)
-            .help("搜索或执行")
-
-            if !prompt.isEmpty {
+            if isThinking {
+                Button {
+                    stopActiveGeneration()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(.red)
+                        .frame(width: 30, height: 30)
+                        .background(Color.red.opacity(0.12), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("终止生成（Esc）")
+            } else if !prompt.isEmpty || response != nil {
                 Button {
                     prompt = ""
                     searchIsFocused = true
                 } label: {
                     Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 17, weight: .medium))
                         .foregroundStyle(.tertiary)
-                        .frame(width: 24, height: 28)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .help("清空")
@@ -412,21 +438,19 @@ struct AssistantPanelView: View {
 
                     Spacer()
 
-                    Text(response.badge)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(accentColor)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(accentColor.opacity(0.09), in: Capsule())
-                }
+                    Button {
+                        copy(response.body)
+                    } label: {
+                        Label(copied ? "已复制" : "复制结果", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
 
-                Text(submittedPrompt)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Button("新问题") {
+                        resetConversation()
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .font(.system(size: 10.5))
 
                 MarkdownContentView(
                     markdown: response.body,
@@ -435,22 +459,28 @@ struct AssistantPanelView: View {
                 )
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                HStack {
-                    Button {
-                        copy(response.body)
-                    } label: {
-                        Label(copied ? "已复制" : "复制结果", systemImage: copied ? "checkmark" : "doc.on.doc")
+                if !response.artifacts.isEmpty {
+                    Group {
+                        switch response.artifactPresentation {
+                        case .createdFile:
+                            HStack {
+                                Spacer(minLength: 0)
+                                VStack(spacing: 10) {
+                                    ForEach(response.artifacts, id: \.standardizedFileURL) { url in
+                                        CreatedFileArtifactCard(url: url) {
+                                            removeArtifact(url)
+                                        }
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                        case .searchResults:
+                            FileSearchResultsList(urls: response.artifacts)
+                        }
                     }
-                    .buttonStyle(.borderless)
-
-                    Spacer()
-
-                    Button("新问题") {
-                        resetConversation()
-                    }
-                    .buttonStyle(.borderless)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .font(.system(size: 11))
+
             }
             .padding(.horizontal, 18)
             .padding(.top, 4)
@@ -503,7 +533,7 @@ struct AssistantPanelView: View {
                 KeyHint(keys: "space", label: "选择")
             }
             KeyHint(keys: "tab", label: "切换")
-            KeyHint(keys: "esc", label: "关闭")
+            KeyHint(keys: "esc", label: isThinking ? "终止" : "关闭")
         }
         .font(.system(size: 10.5))
         .foregroundStyle(.tertiary)
@@ -520,27 +550,6 @@ struct AssistantPanelView: View {
             return missingRequiredParameters.isEmpty
         }
         return !trimmedPrompt.isEmpty
-    }
-
-    private var serviceStatusLabel: String {
-        if let executionActivity, isThinking || response != nil {
-            return executionActivity.scope.label(provider: aiSettings.selectedProvider.shortName)
-        }
-        if let pendingSkill {
-            return executionScope(for: pendingSkill).label(provider: aiSettings.selectedProvider.shortName)
-        }
-        return aiSettings.isConfigured() ? aiSettings.selectedProvider.shortName : "本地"
-    }
-
-    private var serviceStatusIsAvailable: Bool {
-        if let executionActivity, isThinking || response != nil {
-            return executionActivity.scope == .local || aiSettings.isConfigured()
-        }
-        if let pendingSkill {
-            let scope = executionScope(for: pendingSkill)
-            return scope == .local || aiSettings.isConfigured()
-        }
-        return aiSettings.isConfigured()
     }
 
     private func executionScope(for skill: UserSkill) -> PanelExecutionScope {
@@ -576,7 +585,7 @@ struct AssistantPanelView: View {
         case "file.list": "正在整理文件列表"
         case "file.search": "正在搜索本地文件"
         case "file.rename": "正在重命名文件"
-        case "file.move": "正在移动文件"
+        case "file.createEmpty": "正在新建文件"
         case "file.trash": "正在移到废纸篓"
         case "system.snapshot": "正在读取系统状态"
         case "model.generateText": "正在调用 \(aiSettings.selectedProvider.displayName)"
@@ -592,7 +601,7 @@ struct AssistantPanelView: View {
         case "image.ocr": "text.viewfinder"
         case "screen.captureRegion": "viewfinder"
         case "file.readText": "doc.text"
-        case "file.list", "file.search", "file.rename", "file.move", "file.trash": "folder"
+        case "file.list", "file.search", "file.rename", "file.createEmpty", "file.trash": "folder"
         case "system.snapshot": "gauge.with.dots.needle.50percent"
         case "model.generateText": "sparkles"
         default: "bolt"
@@ -644,12 +653,7 @@ struct AssistantPanelView: View {
     private var nextInlineParameterHint: String? {
         guard let pendingSkill else { return nil }
         let remainder = commandRemainder(for: pendingSkill, input: prompt)
-        let nextParameter = pendingSkill.resolvedParameters.first { parameter in
-            if parameter.type.acceptsFiles {
-                return parameterFiles[parameter.id]?.isEmpty != false
-            }
-            return parameterValues[parameter.id]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-        }
+        let nextParameter = nextUnfilledParameter
         guard let nextParameter else { return nil }
         if remainder.isEmpty { return nextParameter.name }
         return prompt.last?.isWhitespace == true ? nextParameter.name : nil
@@ -797,6 +801,12 @@ struct AssistantPanelView: View {
                 return
             }
             refreshInlineArguments(for: pendingSkill, input: newValue)
+            if newValue.last?.isWhitespace == true,
+               let activeInputParameterID,
+               let activeParameter = pendingSkill.resolvedParameters.first(where: { $0.id == activeInputParameterID }),
+               activeParameter.type != .paragraph {
+                synchronizeInputSourceWithNextParameter()
+            }
             return
         }
 
@@ -843,6 +853,40 @@ struct AssistantPanelView: View {
 
         searchIsFocused = true
         AppConsole.shared.info("输入已清空，快捷面板恢复默认状态", category: "Assistant")
+    }
+
+    private func stopActiveGeneration() {
+        guard isThinking else { return }
+        let cancelledRequestID = requestID
+
+        if !submittedPrompt.isEmpty, activeInvocationOptions.savesHistory {
+            InvocationHistoryStore.shared.add(
+                InvocationRecord(
+                    id: cancelledRequestID,
+                    startedAt: requestStartedAt,
+                    endedAt: Date(),
+                    status: .cancelled,
+                    input: submittedPrompt,
+                    title: "请求已终止",
+                    source: "快捷面板",
+                    result: "用户主动终止了正在执行的请求。",
+                    tools: [],
+                    didWriteClipboard: false
+                )
+            )
+        }
+
+        activeTask?.cancel()
+        activeTask = nil
+        requestID = UUID()
+        executionActivity = nil
+        copied = false
+        withAnimation(.easeOut(duration: 0.14)) {
+            isThinking = false
+            response = nil
+        }
+        searchIsFocused = true
+        AppConsole.shared.info("用户已终止正在执行的面板请求", category: "Assistant")
     }
 
     private func acceptCommand(
@@ -908,8 +952,8 @@ struct AssistantPanelView: View {
         guard !query.isEmpty else { return recommendedSkills }
 
         let matches = FeatureItem.all.compactMap { skill -> (skill: FeatureItem, score: Int)? in
-            let scores = skill.searchTerms.compactMap { term -> Int? in
-                let candidate = normalized(term)
+                let scores = skill.searchTerms.compactMap { term -> Int? in
+                    let candidate = normalized(term)
 
                 if candidate == query {
                     return 0
@@ -919,6 +963,9 @@ struct AssistantPanelView: View {
                 }
                 if query.count >= 2, let range = candidate.range(of: query) {
                     return 100 + candidate.distance(from: candidate.startIndex, to: range.lowerBound)
+                }
+                if let fuzzyScore = orderedSubsequenceScore(query: query, candidate: candidate) {
+                    return fuzzyScore
                 }
                 return nil
             }
@@ -958,6 +1005,9 @@ struct AssistantPanelView: View {
                     if query.count >= 2, let range = candidate.range(of: query) {
                         return sourcePenalty + 100 + candidate.distance(from: candidate.startIndex, to: range.lowerBound)
                     }
+                    if let fuzzyScore = orderedSubsequenceScore(query: query, candidate: candidate) {
+                        return sourcePenalty + fuzzyScore
+                    }
                     return nil
                 }
                 guard let score = scores.min() else { return nil }
@@ -973,6 +1023,34 @@ struct AssistantPanelView: View {
         value
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private func orderedSubsequenceScore(query: String, candidate: String) -> Int? {
+        let queryCharacters = Array(query)
+        let candidateCharacters = Array(candidate)
+        guard queryCharacters.count >= 2,
+              queryCharacters.count < candidateCharacters.count else {
+            return nil
+        }
+
+        var searchStart = 0
+        var matchedPositions: [Int] = []
+        for character in queryCharacters {
+            guard let position = candidateCharacters[searchStart...]
+                .firstIndex(of: character) else {
+                return nil
+            }
+            matchedPositions.append(position)
+            searchStart = position + 1
+        }
+
+        let leadingPenalty = (matchedPositions.first ?? 0) * 6
+        let gapPenalty = zip(matchedPositions, matchedPositions.dropFirst())
+            .reduce(0) { partial, pair in
+                partial + max(0, pair.1 - pair.0 - 1) * 3
+            }
+        let lengthPenalty = candidateCharacters.count - queryCharacters.count
+        return 200 + leadingPenalty + gapPenalty + lengthPenalty
     }
 
     private func executeCurrentInput() {
@@ -1034,6 +1112,7 @@ struct AssistantPanelView: View {
         refreshInlineArguments(for: skill, input: input)
         let acceptsFiles = skill.resolvedParameters.contains(where: { $0.type.acceptsFiles })
         PanelController.shared.setInteractionPinned(acceptsFiles)
+        synchronizeInputSourceWithNextParameter()
         searchIsFocused = true
         AppConsole.shared.info(
             "技能“\(skill.name)”进入单行参数输入；参数数=\(skill.resolvedParameters.count)，文件参数=\(acceptsFiles ? "是" : "否")",
@@ -1073,7 +1152,9 @@ struct AssistantPanelView: View {
         parameterFiles = [:]
         externallySuppliedFileParameterIDs = []
         pendingInvocationOptions = .standard
+        activeInputParameterID = nil
         PanelController.shared.setInteractionPinned(false)
+        PanelController.shared.prepareForCommandInput()
         if clearPrompt { prompt = "" }
     }
 
@@ -1089,6 +1170,40 @@ struct AssistantPanelView: View {
         }() else { return "" }
         let index = trimmed.index(trimmed.startIndex, offsetBy: min(term.count, trimmed.count))
         return String(trimmed[index...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var nextUnfilledParameter: SkillParameterDefinition? {
+        guard let pendingSkill else { return nil }
+        return pendingSkill.resolvedParameters.first { parameter in
+            if parameter.type.acceptsFiles {
+                return parameterFiles[parameter.id]?.isEmpty != false
+            }
+            return parameterValues[parameter.id]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty != false
+        }
+    }
+
+    private func synchronizeInputSourceWithNextParameter() {
+        guard let parameter = nextUnfilledParameter else {
+            activeInputParameterID = nil
+            return
+        }
+        activeInputParameterID = parameter.id
+        PanelController.shared.prepareForParameterInput(parameter.type)
+    }
+
+    private func restoreInputSourceForCurrentStage() {
+        guard let pendingSkill else {
+            PanelController.shared.prepareForCommandInput()
+            return
+        }
+        if let activeInputParameterID,
+           let parameter = pendingSkill.resolvedParameters.first(where: { $0.id == activeInputParameterID }) {
+            PanelController.shared.prepareForParameterInput(parameter.type)
+        } else {
+            synchronizeInputSourceWithNextParameter()
+        }
     }
 
     private func chooseFiles(for parameter: SkillParameterDefinition) {
@@ -1124,6 +1239,7 @@ struct AssistantPanelView: View {
         }
         parameterFiles[parameter.id] = [url]
         externallySuppliedFileParameterIDs.insert(parameter.id)
+        synchronizeInputSourceWithNextParameter()
         AppConsole.shared.info("参数“\(parameter.name)”已接收：\(url.lastPathComponent)", category: "Assistant")
     }
 
@@ -1202,8 +1318,7 @@ struct AssistantPanelView: View {
                     system: """
                     你是一个运行在 macOS 快捷面板中的个人助手。直接、简洁地回答用户，不要声称执行了任何尚未调用的系统工具。
                     使用清晰、克制的 Markdown 输出：仅在有助于理解时使用标题或列表；代码必须放在带语言名称的围栏代码块中；不要用代码块包裹整篇回答；不要输出 HTML。
-                    """,
-                    maxTokens: 700
+                    """
                 )
                 guard !Task.isCancelled else { return }
                 finish(
@@ -1349,7 +1464,11 @@ struct AssistantPanelView: View {
                             skillName: sourceName,
                             icon: result.didWriteClipboard ? "doc.on.clipboard.fill" : "bolt.fill",
                             tint: result.didWriteClipboard ? .green : accentColor,
-                            badge: scopeLabel
+                            badge: scopeLabel,
+                            artifacts: result.artifacts,
+                            artifactPresentation: result.executedTools.contains("file.search")
+                                ? .searchResults
+                                : .createdFile
                         ),
                         requestID: currentRequestID,
                         tools: result.executedTools,
@@ -1469,6 +1588,12 @@ struct AssistantPanelView: View {
         NSPasteboard.general.setString(text, forType: .string)
         copied = true
         AppConsole.shared.info("结果已复制到剪贴板；字符数=\(text.count)", category: "Assistant")
+    }
+
+    private func removeArtifact(_ url: URL) {
+        guard var currentResponse = response else { return }
+        currentResponse.artifacts.removeAll { $0.standardizedFileURL == url.standardizedFileURL }
+        response = currentResponse
     }
 
     private func resetConversation() {
@@ -1747,6 +1872,253 @@ private struct DemoResponse {
     let icon: String
     let tint: Color
     let badge: String
+    var artifacts: [URL]
+    let artifactPresentation: PanelArtifactPresentation
+
+    init(
+        title: String,
+        body: String,
+        skillName: String,
+        icon: String,
+        tint: Color,
+        badge: String,
+        artifacts: [URL] = [],
+        artifactPresentation: PanelArtifactPresentation = .createdFile
+    ) {
+        self.title = title
+        self.body = body
+        self.skillName = skillName
+        self.icon = icon
+        self.tint = tint
+        self.badge = badge
+        self.artifacts = artifacts
+        self.artifactPresentation = artifactPresentation
+    }
+}
+
+private enum PanelArtifactPresentation {
+    case createdFile
+    case searchResults
+}
+
+private struct CreatedFileArtifactCard: View {
+    let url: URL
+    let onRemoved: () -> Void
+
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(spacing: 9) {
+            VStack(spacing: 8) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 56, height: 56)
+
+                Text(url.lastPathComponent)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 8)
+
+                Text("下载项目录 · 可拖动")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 156, height: 132)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.09), lineWidth: 0.7)
+            }
+            .shadow(color: .black.opacity(0.09), radius: 10, y: 4)
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .onTapGesture(count: 2, perform: openFile)
+            .onDrag {
+                NSItemProvider(object: url as NSURL)
+            }
+
+            HStack(spacing: 18) {
+                Button(action: openFile) {
+                    Label("打开", systemImage: "arrow.up.forward.app")
+                }
+                .buttonStyle(.borderless)
+
+                Button(action: moveToTrash) {
+                    Label("删除", systemImage: "trash")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.red)
+            }
+            .font(.system(size: 10.5, weight: .medium))
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .frame(maxWidth: 200)
+            }
+        }
+    }
+
+    private func openFile() {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            errorMessage = "文件已经被移动或删除"
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func moveToTrash() {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            onRemoved()
+            return
+        }
+        var resultingURL: NSURL?
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: &resultingURL)
+            AppConsole.shared.info("新建文件已移到废纸篓：\(url.lastPathComponent)", category: "Artifact")
+            onRemoved()
+        } catch {
+            errorMessage = error.localizedDescription
+            AppConsole.shared.error("删除新建文件失败：\(error.localizedDescription)", category: "Artifact")
+        }
+    }
+}
+
+private struct FileSearchResultsList: View {
+    let urls: [URL]
+
+    var body: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(Array(urls.enumerated()), id: \.element.standardizedFileURL) { index, url in
+                FileSearchResultRow(url: url)
+                if index + 1 < urls.count {
+                    Divider()
+                        .padding(.leading, 52)
+                }
+            }
+        }
+        .background(
+            Color.primary.opacity(0.04),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.7)
+        }
+    }
+}
+
+private struct FileSearchResultRow: View {
+    let url: URL
+
+    private var isDirectory: Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    private var parentPath: String {
+        let path = url.deletingLastPathComponent().path
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return path.hasPrefix(home) ? "~" + String(path.dropFirst(home.count)) : path
+    }
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                .resizable()
+                .scaledToFit()
+                .frame(width: 30, height: 30)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(url.lastPathComponent)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(parentPath)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            Image(systemName: isDirectory ? "folder" : "arrow.up.forward.app")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 13)
+        .frame(height: 52)
+        .contentShape(Rectangle())
+        .overlay {
+            FileResultClickCapture(
+                singleClick: revealOrOpen,
+                doubleClick: open
+            )
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { revealOrOpen() }
+    }
+
+    private func revealOrOpen() {
+        if isDirectory {
+            open()
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
+
+    private func open() {
+        NSWorkspace.shared.open(url)
+    }
+}
+
+private struct FileResultClickCapture: NSViewRepresentable {
+    let singleClick: () -> Void
+    let doubleClick: () -> Void
+
+    func makeNSView(context: Context) -> FileResultClickNSView {
+        let view = FileResultClickNSView()
+        view.singleClick = singleClick
+        view.doubleClick = doubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: FileResultClickNSView, context: Context) {
+        nsView.singleClick = singleClick
+        nsView.doubleClick = doubleClick
+    }
+}
+
+private final class FileResultClickNSView: NSView {
+    var singleClick: () -> Void = {}
+    var doubleClick: () -> Void = {}
+    private var pendingSingleClick: DispatchWorkItem?
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            pendingSingleClick?.cancel()
+            pendingSingleClick = nil
+            doubleClick()
+            return
+        }
+
+        pendingSingleClick?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.singleClick()
+            self?.pendingSingleClick = nil
+        }
+        pendingSingleClick = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24, execute: workItem)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
 }
 
 #Preview {

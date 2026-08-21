@@ -1,4 +1,75 @@
 import AppKit
+import ServiceManagement
+
+@MainActor
+final class LaunchAtLoginController: ObservableObject {
+    static let shared = LaunchAtLoginController()
+
+    @Published private(set) var isRegistered = false
+    @Published private(set) var requiresApproval = false
+    @Published private(set) var errorMessage: String?
+
+    private let service = SMAppService.mainApp
+
+    private init() {
+        refresh()
+    }
+
+    func refresh() {
+        switch service.status {
+        case .enabled:
+            isRegistered = true
+            requiresApproval = false
+        case .requiresApproval:
+            isRegistered = true
+            requiresApproval = true
+        case .notRegistered, .notFound:
+            isRegistered = false
+            requiresApproval = false
+        @unknown default:
+            isRegistered = false
+            requiresApproval = false
+        }
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        errorMessage = nil
+        do {
+            if enabled {
+                switch service.status {
+                case .enabled, .requiresApproval:
+                    break
+                case .notRegistered, .notFound:
+                    try service.register()
+                @unknown default:
+                    try service.register()
+                }
+            } else if service.status != .notRegistered {
+                try service.unregister()
+            }
+            refresh()
+            AppConsole.shared.info(
+                enabled ? "已注册登录时自动启动" : "已取消登录时自动启动",
+                category: "Lifecycle"
+            )
+        } catch {
+            refresh()
+            if requiresApproval {
+                errorMessage = "已提交登录项，但需要在系统设置中允许。"
+            } else {
+                errorMessage = error.localizedDescription
+            }
+            AppConsole.shared.error(
+                "修改登录项失败：\(error.localizedDescription)",
+                category: "Lifecycle"
+            )
+        }
+    }
+
+    func openSystemSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+}
 
 @MainActor
 final class DockIconController {
@@ -48,6 +119,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        DispatchQueue.main.async {
+            PanelController.shared.show()
+        }
+        AppConsole.shared.info("用户点击 Dock 图标，正在打开主面板", category: "Lifecycle")
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {

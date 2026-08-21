@@ -2,12 +2,24 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+extension Color {
+    /// One semantic surface for every non-glass area in the settings window.
+    /// Keeping this dynamic preserves the correct native shade in light, dark,
+    /// and system appearance without letting Form/List choose another canvas.
+    static var settingsPaneBackground: Color {
+        Color(nsColor: .windowBackgroundColor)
+    }
+}
+
 struct SettingsView: View {
-    @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
+    @AppStorage("automaticInputSourceSwitching") private var automaticInputSourceSwitching = true
     @AppStorage("preferredAppearance") private var preferredAppearance = "system"
     @AppStorage("appAccent") private var appAccent = AppAccent.purple.rawValue
+    @ObservedObject private var invocationHistory = InvocationHistoryStore.shared
+    @ObservedObject private var launchAtLogin = LaunchAtLoginController.shared
     @State private var selection: SettingsSection? = .general
+    @State private var historySearchText = ""
     @State private var navigationHistory: [SettingsSection] = [.general]
     @State private var navigationIndex = 0
     @State private var isApplyingHistory = false
@@ -21,7 +33,7 @@ struct SettingsView: View {
 
                 ScrollView {
                     LazyVStack(spacing: 3) {
-                    ForEach(SettingsSection.allCases) { section in
+                        ForEach(SettingsSection.allCases) { section in
                             SettingsSidebarRow(
                                 section: section,
                                 isSelected: selection == section,
@@ -41,13 +53,18 @@ struct SettingsView: View {
             SettingsSplitSeam()
 
             rightDetail
-                .background(Color(nsColor: .windowBackgroundColor))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.settingsPaneBackground)
         }
         .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 680, minHeight: 520)
         .tint(accentColor)
         .onAppear {
             AppAppearance.apply(preferredAppearance)
+            launchAtLogin.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            launchAtLogin.refresh()
         }
         .onChange(of: preferredAppearance) { _, newValue in
             AppAppearance.apply(newValue)
@@ -79,6 +96,10 @@ struct SettingsView: View {
                 SettingsPageHeader(
                     title: currentSection.title,
                     showsSeparator: isDetailScrolled,
+                    searchText: currentSection == .history ? $historySearchText : nil,
+                    searchPrompt: currentSection == .history
+                        ? "在 \(invocationHistory.records.count) 条记录中搜索"
+                        : nil,
                     canGoBack: navigationIndex > 0,
                     canGoForward: navigationIndex + 1 < navigationHistory.count,
                     goBack: { moveInHistory(by: -1) },
@@ -89,6 +110,7 @@ struct SettingsView: View {
                     .trackSettingsScroll($isDetailScrolled)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .background(Color.settingsPaneBackground)
         }
     }
 
@@ -118,7 +140,7 @@ struct SettingsView: View {
     private var settingsDetail: some View {
         switch currentSection {
         case .general: generalSettings
-        case .history: InvocationHistorySettingsView()
+        case .history: InvocationHistorySettingsView(searchText: $historySearchText)
         case .aiServices: AIProviderSettingsView()
         case .localModel: modelSettings
         case .skills: EmptyView()
@@ -129,8 +151,24 @@ struct SettingsView: View {
     private var generalSettings: some View {
         Form {
             Section("启动") {
-                Toggle("登录时自动启动", isOn: $launchAtLogin)
+                Toggle("登录时自动启动", isOn: launchAtLoginBinding)
                 Toggle("显示菜单栏图标", isOn: $showMenuBarIcon)
+
+                if launchAtLogin.requiresApproval {
+                    HStack {
+                        Label("等待在系统设置中允许", systemImage: "exclamationmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("打开登录项设置…") {
+                            launchAtLogin.openSystemSettings()
+                        }
+                    }
+                } else if let errorMessage = launchAtLogin.errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
             Section("快捷键") {
                 LabeledContent("打开助手") {
@@ -139,6 +177,12 @@ struct SettingsView: View {
                         SettingsKeyCap("Space")
                     }
                 }
+            }
+            Section("输入") {
+                Toggle("根据参数自动切换输入法", isOn: $automaticInputSourceSwitching)
+                Text("唤起面板时使用英文输入技能关键词；确认技能后，如果下一个参数是文本或段落文字，则恢复到唤起前使用的输入法。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("外观") {
                 Picker("外观", selection: $preferredAppearance) {
@@ -184,12 +228,21 @@ struct SettingsView: View {
                 LabeledContent("失去焦点", value: "自动隐藏")
             }
             Section {
-                Text("全局快捷键已经生效；登录启动和菜单栏开关将在后续版本连接系统设置。")
+                Text("全局快捷键和登录时自动启动已经接入 macOS；菜单栏图标开关将在后续版本连接系统设置。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.settingsPaneBackground)
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLogin.isRegistered },
+            set: { launchAtLogin.setEnabled($0) }
+        )
     }
 
     private var modelSettings: some View {
@@ -205,6 +258,7 @@ struct SettingsView: View {
                 .frame(maxWidth: 400)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.settingsPaneBackground)
     }
 
 }
@@ -356,6 +410,8 @@ private struct PrivacySettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.settingsPaneBackground)
         .onAppear { permissions.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             permissions.refresh()
@@ -471,7 +527,7 @@ private struct SettingsSplitSeam: View {
             // The settings window itself is transparent so Liquid Glass can sample
             // the desktop. Give the split gutter an opaque backing; otherwise the
             // translucent system Divider exposes a one-pixel strip behind the app.
-            Color(nsColor: .windowBackgroundColor)
+            Color.settingsPaneBackground
 
             Color.primary.opacity(0.12)
                 .frame(width: 0.5)
@@ -504,9 +560,16 @@ private struct SettingsSidebarRow: View {
 
     var body: some View {
         Button(action: action) {
-            Label(section.title, systemImage: section.symbol)
-                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
+            HStack(spacing: 9) {
+                Image(systemName: section.symbol)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.white : accentColor)
+                    .frame(width: 17)
+
+                Text(section.title)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+            }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
                 .frame(height: 34)
@@ -545,6 +608,32 @@ private extension View {
         }
     }
 
+    @ViewBuilder
+    func settingsHeaderSearchGlass() -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            background(.regularMaterial, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.8)
+                }
+        }
+    }
+
+    @ViewBuilder
+    func settingsFloatingGlass() -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            background(.regularMaterial, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.8)
+                }
+        }
+    }
+
     func trackSettingsScroll(_ isScrolled: Binding<Bool>) -> some View {
         onScrollGeometryChange(for: Bool.self) { geometry in
             geometry.contentOffset.y + geometry.contentInsets.top > 1
@@ -559,6 +648,8 @@ private extension View {
 private struct SettingsPageHeader: View {
     let title: String
     var showsSeparator = false
+    var searchText: Binding<String>? = nil
+    var searchPrompt: String? = nil
     let canGoBack: Bool
     let canGoForward: Bool
     let goBack: () -> Void
@@ -578,10 +669,17 @@ private struct SettingsPageHeader: View {
                 .lineLimit(1)
 
             Spacer()
+
+            if let searchText {
+                SettingsHeaderSearchField(
+                    text: searchText,
+                    prompt: searchPrompt ?? "搜索"
+                )
+            }
         }
-        .offset(y: 3)
-        .padding(.horizontal, 18)
-        .frame(height: 50)
+        .padding(.horizontal, 11)
+        .frame(height: 58)
+        .background(Color.settingsPaneBackground)
         .overlay(alignment: .bottom) {
             if showsSeparator {
                 Divider()
@@ -589,6 +687,60 @@ private struct SettingsPageHeader: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: showsSeparator)
+    }
+}
+
+private struct SettingsHeaderSearchField: View {
+    @Binding var text: String
+    let prompt: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            TextField(prompt, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5))
+
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("清空搜索")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(width: 210, height: 36)
+        .settingsHeaderSearchGlass()
+    }
+}
+
+struct SettingsFloatingActionButton: View {
+    let title: String
+    let symbol: String
+    var tint: Color = .primary
+    var disabled = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(disabled ? Color.secondary.opacity(0.45) : tint)
+                .padding(.horizontal, 13)
+                .frame(height: 36)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .settingsFloatingGlass()
+        .disabled(disabled)
     }
 }
 
@@ -675,6 +827,9 @@ private struct SkillManagementView: View {
     @State private var skillPendingDeletion: UserSkill?
     @State private var isLibraryScrolled = false
     @State private var forwardEditingSkillID: UUID?
+    @State private var isSelecting = false
+    @State private var selectedSkillIDs: Set<UUID> = []
+    @State private var isConfirmingBatchDelete = false
 
     var body: some View {
         Group {
@@ -695,6 +850,8 @@ private struct SkillManagementView: View {
                     SettingsPageHeader(
                         title: SettingsSection.skills.title,
                         showsSeparator: isLibraryScrolled,
+                        searchText: $searchText,
+                        searchPrompt: "在 \(skillStore.skills.count) 项技能中搜索",
                         canGoBack: canGoBack,
                         canGoForward: forwardEditingSkillID != nil || canGoForward,
                         goBack: goBack,
@@ -704,7 +861,9 @@ private struct SkillManagementView: View {
                 }
             }
         }
+        .background(Color.settingsPaneBackground)
         .onChange(of: skillStore.skills.map(\.id)) {
+            selectedSkillIDs.formIntersection(Set(skillStore.skills.map(\.id)))
             if let editingSkillID,
                !skillStore.skills.contains(where: { $0.id == editingSkillID }) {
                 self.editingSkillID = nil
@@ -727,31 +886,16 @@ private struct SkillManagementView: View {
         } message: { skill in
             Text("“\(skill.name)”会从本机永久删除。你可以先导出备份。")
         }
+        .alert("删除选中的 \(selectedSkillIDs.count) 项技能？", isPresented: $isConfirmingBatchDelete) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive, action: deleteSelectedSkills)
+        } message: {
+            Text("删除后无法恢复。需要保留的技能请先批量导出。")
+        }
     }
 
     private var skillLibrary: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("搜索技能", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 11)
-            .frame(height: 36)
-            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-
+        ZStack(alignment: .bottomTrailing) {
             if filteredSkills.isEmpty {
                 ContentUnavailableView(
                     searchText.isEmpty ? "还没有技能" : "没有匹配的技能",
@@ -759,50 +903,93 @@ private struct SkillManagementView: View {
                     description: Text(searchText.isEmpty ? "创建第一个技能后，它会出现在这里。" : "尝试搜索名称、关键词或说明。")
                 )
             } else {
-                List(filteredSkills) { skill in
-                    Button {
-                        openEditor(for: skill)
-                    } label: {
-                        SkillManagementRow(skill: skill)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(filteredSkills.enumerated()), id: \.element.id) { index, skill in
+                            Button {
+                                if isSelecting {
+                                    toggleSelection(for: skill.id)
+                                } else {
+                                    openEditor(for: skill)
+                                }
+                            } label: {
+                                SkillManagementRow(
+                                    skill: skill,
+                                    isSelecting: isSelecting,
+                                    isSelected: selectedSkillIDs.contains(skill.id)
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                if !isSelecting {
+                                    Button("编辑") { openEditor(for: skill) }
+                                    Button("导出…") { export(skill) }
+                                    Divider()
+                                    Button("删除", role: .destructive) { skillPendingDeletion = skill }
+                                }
+                            }
+
+                            if index + 1 < filteredSkills.count {
+                                Divider()
+                                    .padding(.leading, 52)
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("编辑") { openEditor(for: skill) }
-                        Button("导出…") { export(skill) }
-                        Divider()
-                        Button("删除", role: .destructive) { skillPendingDeletion = skill }
+                    .background(
+                        Color.primary.opacity(0.045),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.055), lineWidth: 0.7)
                     }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+                    .padding(.bottom, 72)
                 }
-                .listStyle(.inset)
                 .trackSettingsScroll($isLibraryScrolled)
             }
 
-            Divider()
+            skillFloatingControls
+                .padding(18)
+        }
+        .background(Color.settingsPaneBackground)
+    }
 
-            HStack {
-                Button {
+    private var skillFloatingControls: some View {
+        HStack(spacing: 8) {
+            if isSelecting {
+                SettingsFloatingActionButton(title: "取消", symbol: "xmark") {
+                    leaveSelectionMode()
+                }
+                SettingsFloatingActionButton(
+                    title: "导出 \(selectedSkillIDs.count) 项",
+                    symbol: "square.and.arrow.up.on.square",
+                    disabled: selectedSkillIDs.isEmpty,
+                    action: exportSelectedSkills
+                )
+                SettingsFloatingActionButton(
+                    title: "删除 \(selectedSkillIDs.count) 项",
+                    symbol: "trash",
+                    tint: .red,
+                    disabled: selectedSkillIDs.isEmpty
+                ) {
+                    isConfirmingBatchDelete = true
+                }
+            } else {
+                SettingsFloatingActionButton(title: "创建技能", symbol: "plus") {
                     SkillCreatorWindowController.shared.show()
-                } label: {
-                    Label("创建技能", systemImage: "plus")
                 }
-                .buttonStyle(.borderless)
-
-                Spacer()
-
-                if let message {
-                    Text(message.text)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(message.isError ? Color.red : Color.green)
+                SettingsFloatingActionButton(
+                    title: "多选",
+                    symbol: "checkmark.circle",
+                    disabled: skillStore.skills.isEmpty
+                ) {
+                    isSelecting = true
                 }
-
-                Text("\(skillStore.skills.count) 项技能")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
             }
-            .padding(.horizontal, 20)
-            .frame(height: 44)
         }
     }
 
@@ -823,6 +1010,19 @@ private struct SkillManagementView: View {
         editingSkillID = skill.id
         forwardEditingSkillID = nil
         message = nil
+    }
+
+    private func toggleSelection(for id: UUID) {
+        if selectedSkillIDs.contains(id) {
+            selectedSkillIDs.remove(id)
+        } else {
+            selectedSkillIDs.insert(id)
+        }
+    }
+
+    private func leaveSelectionMode() {
+        isSelecting = false
+        selectedSkillIDs.removeAll()
     }
 
     private func closeEditorForBack() {
@@ -958,6 +1158,68 @@ private struct SkillManagementView: View {
         }
     }
 
+    private var selectedSkills: [UserSkill] {
+        skillStore.skills.filter { selectedSkillIDs.contains($0.id) }
+    }
+
+    private func deleteSelectedSkills() {
+        let skills = selectedSkills
+        do {
+            for skill in skills {
+                try skillStore.delete(skill)
+            }
+            message = SkillManagementMessage(text: "已删除 \(skills.count) 项技能", isError: false)
+            leaveSelectionMode()
+        } catch {
+            message = SkillManagementMessage(text: "批量删除失败：\(error.localizedDescription)", isError: true)
+            selectedSkillIDs.formIntersection(Set(skillStore.skills.map(\.id)))
+        }
+    }
+
+    private func exportSelectedSkills() {
+        let skills = selectedSkills
+        guard !skills.isEmpty else { return }
+
+        let panel = NSOpenPanel()
+        panel.title = "选择批量导出位置"
+        panel.prompt = "导出到此处"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.begin { response in
+            guard response == .OK, let directory = panel.url else { return }
+            do {
+                for skill in skills {
+                    let url = availableExportURL(
+                        in: directory,
+                        filename: safeFilename(skill.name),
+                        pathExtension: "laskill"
+                    )
+                    let data = try skillStore.exportPackageData(for: skill)
+                    try data.write(to: url, options: .atomic)
+                }
+                message = SkillManagementMessage(text: "已导出 \(skills.count) 项技能", isError: false)
+                AppConsole.shared.success("批量导出 \(skills.count) 项技能到：\(directory.path)", category: "SkillStore")
+            } catch {
+                message = SkillManagementMessage(text: "批量导出失败：\(error.localizedDescription)", isError: true)
+                AppConsole.shared.error("技能批量导出失败：\(error.localizedDescription)", category: "SkillStore")
+            }
+        }
+    }
+
+    private func availableExportURL(in directory: URL, filename: String, pathExtension: String) -> URL {
+        var candidate = directory.appendingPathComponent(filename).appendingPathExtension(pathExtension)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = directory
+                .appendingPathComponent("\(filename)-\(suffix)")
+                .appendingPathExtension(pathExtension)
+            suffix += 1
+        }
+        return candidate
+    }
+
     private func safeFilename(_ value: String) -> String {
         let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
         let components = value.components(separatedBy: invalid).filter { !$0.isEmpty }
@@ -967,6 +1229,8 @@ private struct SkillManagementView: View {
 
 private struct SkillManagementRow: View {
     let skill: UserSkill
+    let isSelecting: Bool
+    let isSelected: Bool
 
     var body: some View {
         HStack(spacing: 9) {
@@ -994,11 +1258,18 @@ private struct SkillManagementRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Circle()
-                .fill(skill.isEnabled ? Color.green : Color.secondary.opacity(0.5))
-                .frame(width: 6, height: 6)
+            if isSelecting {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.55))
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
@@ -1069,10 +1340,9 @@ private struct SkillEditorView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
             }
-            .offset(y: 3)
-            .padding(.horizontal, 18)
-            .frame(height: 50)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .padding(.horizontal, 11)
+            .frame(height: 58)
+            .background(Color.settingsPaneBackground)
             .overlay(alignment: .bottom) {
                 if isFormScrolled {
                     Divider()
@@ -1167,7 +1437,7 @@ private struct SkillEditorView: View {
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Color.settingsPaneBackground)
             .trackSettingsScroll($isFormScrolled)
 
             Divider()
@@ -1190,9 +1460,9 @@ private struct SkillEditorView: View {
             }
             .padding(.horizontal, 20)
             .frame(height: 48)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Color.settingsPaneBackground)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.settingsPaneBackground)
     }
 
     private var aliasesBinding: Binding<String> {
@@ -1423,6 +1693,8 @@ private struct AIProviderSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.settingsPaneBackground)
         .onAppear(perform: loadSelectedProvider)
         .onChange(of: settings.selectedProvider) {
             loadSelectedProvider()

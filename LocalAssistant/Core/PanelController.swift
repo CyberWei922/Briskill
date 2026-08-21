@@ -2,6 +2,15 @@ import AppKit
 import Carbon.HIToolbox
 import SwiftUI
 
+extension Notification.Name {
+    static let assistantPanelShouldFocusSearch = Notification.Name(
+        "LocalAssistant.assistantPanelShouldFocusSearch"
+    )
+    static let assistantPanelShouldCancelGeneration = Notification.Name(
+        "LocalAssistant.assistantPanelShouldCancelGeneration"
+    )
+}
+
 @MainActor
 final class PanelController: NSObject, NSWindowDelegate {
     static let shared = PanelController()
@@ -9,9 +18,11 @@ final class PanelController: NSObject, NSWindowDelegate {
     private var panel: AssistantPanel?
     private let savedOriginXKey = "assistantPanel.origin.x"
     private let savedOriginYKey = "assistantPanel.origin.y"
+    private let automaticInputSourceSwitchingKey = "automaticInputSourceSwitching"
     private let inputSourceSession = KeyboardInputSourceSession()
     private var isInteractionPinned = false
     private var isPerformingSystemInteraction = false
+    private var isGenerationActive = false
 
     func toggle() {
         if panel?.isVisible == true {
@@ -36,13 +47,48 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
 
         NSApplication.shared.activate(ignoringOtherApps: true)
-        inputSourceSession.beginInEnglish()
+        if automaticInputSourceSwitchingEnabled {
+            inputSourceSession.beginInEnglish()
+        }
+        let wasAlreadyKey = panel.isKeyWindow
         panel.makeKeyAndOrderFront(nil)
-        AppConsole.shared.info("快捷面板已显示并聚焦输入框", category: "Panel")
+        if wasAlreadyKey {
+            scheduleSearchFocus(for: panel)
+        }
+        AppConsole.shared.info("快捷面板已显示，等待窗口激活后聚焦输入框", category: "Panel")
     }
 
     func prepareForTermination() {
         inputSourceSession.restore()
+    }
+
+    func prepareForCommandInput() {
+        guard automaticInputSourceSwitchingEnabled else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.panel?.isVisible == true else { return }
+            self.inputSourceSession.selectEnglish()
+        }
+    }
+
+    func prepareForParameterInput(_ type: SkillParameterType) {
+        guard automaticInputSourceSwitchingEnabled else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.panel?.isVisible == true else { return }
+            switch type {
+            case .text, .paragraph:
+                self.inputSourceSession.selectPrevious()
+                AppConsole.shared.info(
+                    "下一参数为\(type.displayName)，已恢复唤起面板前的输入法",
+                    category: "InputSource"
+                )
+            case .file, .image, .folder, .number, .boolean:
+                self.inputSourceSession.selectEnglish()
+                AppConsole.shared.info(
+                    "下一参数为\(type.displayName)，继续使用英文输入源",
+                    category: "InputSource"
+                )
+            }
+        }
     }
 
     func setInteractionPinned(_ pinned: Bool) {
@@ -52,6 +98,10 @@ final class PanelController: NSObject, NSWindowDelegate {
             pinned ? "快捷面板已临时固定，可从 Finder 拖入文件" : "快捷面板已恢复失焦自动隐藏",
             category: "Panel"
         )
+    }
+
+    func setGenerationActive(_ active: Bool) {
+        isGenerationActive = active
     }
 
     func hideForSystemInteraction() {
@@ -86,6 +136,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.delegate = self
+        panel.cancelHandler = { [weak self] in
+            guard self?.isGenerationActive == true else { return false }
+            NotificationCenter.default.post(name: .assistantPanelShouldCancelGeneration, object: nil)
+            return true
+        }
         panel.contentView = NSHostingView(rootView: AssistantPanelView())
         return panel
     }
@@ -100,6 +155,27 @@ final class PanelController: NSObject, NSWindowDelegate {
         inputSourceSession.restore()
         window.orderOut(nil)
         AppConsole.shared.info("快捷面板失去焦点并隐藏", category: "Panel")
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window === panel else { return }
+
+        scheduleSearchFocus(for: window)
+    }
+
+    private func scheduleSearchFocus(for window: NSWindow) {
+        // makeKeyAndOrderFront can complete before SwiftUI has restored its
+        // responder chain. Defer one run-loop turn and ask the view to reset
+        // FocusState before focusing again on every presentation.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self,
+                  let window,
+                  window === self.panel,
+                  window.isVisible,
+                  window.isKeyWindow else { return }
+            NotificationCenter.default.post(name: .assistantPanelShouldFocusSearch, object: window)
+        }
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -171,24 +247,37 @@ final class PanelController: NSObject, NSWindowDelegate {
         guard !intersection.isNull else { return 0 }
         return intersection.width * intersection.height
     }
+
+    private var automaticInputSourceSwitchingEnabled: Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: automaticInputSourceSwitchingKey) != nil else {
+            return true
+        }
+        return defaults.bool(forKey: automaticInputSourceSwitchingKey)
+    }
 }
 
 private final class KeyboardInputSourceSession {
     private var previousInputSource: TISInputSource?
 
     func beginInEnglish() {
-        guard previousInputSource == nil,
-              let currentInputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
-            return
+        if previousInputSource == nil,
+           let currentInputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() {
+            previousInputSource = currentInputSource
         }
+        selectEnglish()
+    }
 
-        previousInputSource = currentInputSource
-
+    func selectEnglish() {
         guard let englishInputSource = TISCopyInputSourceForLanguage("en" as CFString)?.takeRetainedValue() else {
             return
         }
-
         TISSelectInputSource(englishInputSource)
+    }
+
+    func selectPrevious() {
+        guard let previousInputSource else { return }
+        TISSelectInputSource(previousInputSource)
     }
 
     func restore() {
@@ -199,10 +288,15 @@ private final class KeyboardInputSourceSession {
 }
 
 final class AssistantPanel: NSPanel {
+    var cancelHandler: (() -> Bool)?
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
     override func cancelOperation(_ sender: Any?) {
+        if cancelHandler?() == true {
+            return
+        }
         orderOut(nil)
     }
 }

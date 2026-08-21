@@ -219,7 +219,7 @@ Chrome 相关进程目前共占用约 8.4GB，可能来自网页、扩展或后�
 - 语义搜索。
 - 文件整理和分类。
 - 批量重命名。
-- 移动文件。
+- 在下载目录快速新建带后缀的空文件。
 - 创建文件夹。
 - 查找相似或重复文件。
 - 文件问答和文件夹总结。
@@ -848,7 +848,7 @@ Fast commands. Private intelligence. Safe actions.
 1. **个人能力生成**：用户用一句话描述重复任务，产品通过澄清、计划预览和试运行把它保存成自己的搜索技能，不要求理解节点、变量或代码。
 2. **系统医生**：`la ask 为什么电脑这么卡` 能在约 1～2 秒内指出真实的内存、Swap、CPU 或磁盘原因，并给出下一步建议。
 3. **瞬时处理**：`la ocr`、翻译、总结和文件查找等直接动作不为路由加载语言模型，尽量在 0.5～1 秒内给出反馈。
-4. **安全行动**：整理、重命名和移动文件时先展示清晰 diff，用户确认后执行，并且能够撤销。
+4. **安全行动**：整理、重命名和删除文件时先展示清晰 diff，用户确认后执行，并且能够撤销。
 
 OCR、翻译、剪贴板和本机诊断是让用户快速理解产品价值的示例能力；“一句话生成个人技能 + 可信的本地执行 + 可撤销操作”才是更适合作为长期差异化核心的组合。
 
@@ -1116,7 +1116,9 @@ Demo 版本提交后，工程开始进入可运行的核心功能原型阶段。
 - 用户确认后的技能以 JSON 保存在 `Application Support/LocalAssistant/Skills/skills.json`，不写入 App 包。
 - 保存后的技能立即进入快捷面板搜索和预测；纯文本模型类技能可以调用当前 API 试运行。
 - 未注册工具的技能只展示真实执行计划和缺失能力，不允许模型伪造执行结果。
-- 已建立可运行的 `ToolRegistry` 与顺序 `WorkflowEngine`，当前正式注册 `clipboard.readText`、`clipboard.writeText`、`selection.readText`、`selection.replaceText`、`screen.captureRegion`、`image.ocr`、`file.readText`、`file.list`、`file.search`、`file.rename`、`file.move`、`file.trash`、`system.snapshot` 和 `model.generateText`。工作流支持 `{{参数名}}`、`$步骤变量`、`saveAs`、取消、逐步错误传播和脱敏耗时日志。
+- 已建立可运行的 `ToolRegistry` 与顺序 `WorkflowEngine`，当前正式注册 `clipboard.readText`、`clipboard.writeText`、`selection.readText`、`selection.replaceText`、`screen.captureRegion`、`image.ocr`、`file.readText`、`file.list`、`file.search`、`file.rename`、`file.createEmpty`、`file.trash`、`system.snapshot` 和 `model.generateText`。工作流支持 `{{参数名}}`、`$步骤变量`、`saveAs`、取消、逐步错误传播和脱敏耗时日志。
+- 内置 `move` 移动文件技能及 `file.move` 工具已经移除；新增 `new 名称.后缀` 本地技能，在 Downloads 创建空文件，并在结果区提供可拖拽、双击打开和移到废纸篓的文件卡片。
+- 文件型工具结果使用专用交互视图而不是 Markdown 路径堆叠：`new` 显示居中的文件卡片和直接打开/移到废纸篓操作；`find` 显示可交互文件列表，单击普通文件在 Finder 中定位、双击使用默认应用打开，文件夹单击或双击均直接打开。
 - 所有面向用户的默认能力都必须保存成标准技能定义并出现在技能管理中，不再维护一套无法编辑的硬编码功能卡片。当前随应用安装 15 个默认技能，只额外带 `origin=builtIn` 与稳定标识；用户可以像处理自建技能一样编辑、启停、导出或删除。程序不得覆盖用户对内置技能的修改，删除后必须保存墓碑记录，后续启动或升级不能自动强制恢复。
 - “剪贴板翻译”已经完成第一个本地—云端—本地闭环：读取剪贴板纯文本，调用用户当前选择的云端模型，将最终译文写回剪贴板并同时在主面板显示。写入后会立即回读验证；剪贴板为空或写入失败时显示明确错误。
 - 早期版本生成的 `clipboard + translate` 技能即使没有 `workflow` 和 `modelTask`，运行时也会由兼容层转换成三步标准工作流，因此用户不需要重新创建原有的 `trans` 技能。

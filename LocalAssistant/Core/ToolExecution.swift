@@ -8,6 +8,7 @@ struct WorkflowExecutionResult {
     let outputText: String
     let executedTools: [String]
     let didWriteClipboard: Bool
+    let artifacts: [URL]
 }
 
 struct WorkflowExecutionProgress: Equatable {
@@ -117,6 +118,13 @@ private struct SystemClipboardAccess: ClipboardAccess {
 private struct ToolExecutionOutput {
     let value: SkillJSONValue
     let displayText: String?
+    let artifacts: [URL]
+
+    init(value: SkillJSONValue, displayText: String?, artifacts: [URL] = []) {
+        self.value = value
+        self.displayText = displayText
+        self.artifacts = artifacts
+    }
 }
 
 private struct ToolExecutionContext {
@@ -650,13 +658,12 @@ private final class FileSearchTool: AssistantTool {
         if matches.isEmpty {
             markdown = "没有找到名称包含“\(query)”的文件。"
         } else {
-            markdown = matches.enumerated().map { index, url in
-                "\(index + 1). **\(url.lastPathComponent)**  \n   `\(url.path.replacingOccurrences(of: "`", with: "\\`"))`"
-            }.joined(separator: "\n")
+            markdown = "找到 \(matches.count) 个名称包含“\(query)”的项目。"
         }
         return ToolExecutionOutput(
             value: .array(matches.map { .string($0.path) }),
-            displayText: markdown
+            displayText: markdown,
+            artifacts: matches
         )
     }
 
@@ -733,36 +740,47 @@ private final class FileRenameTool: AssistantTool {
 }
 
 @MainActor
-private final class FileMoveTool: AssistantTool {
-    let identifier = "file.move"
+private final class FileCreateEmptyTool: AssistantTool {
+    let identifier = "file.createEmpty"
 
     func execute(
         arguments: [String: SkillJSONValue],
         context: ToolExecutionContext
     ) async throws -> ToolExecutionOutput {
-        let source = try ToolPathResolver.validateMutableUserItem(
-            ToolPathResolver.existingURL(from: arguments, keys: ["path", "source"], tool: identifier)
-        )
-        let directory = try ToolPathResolver.existingURL(
-            from: arguments,
-            keys: ["destination", "directory", "to"],
-            tool: identifier
-        )
-        let destination = directory.appendingPathComponent(source.lastPathComponent)
-        guard !FileManager.default.fileExists(atPath: destination.path) else {
-            throw ToolExecutionError.fileOperationFailed("目标位置已经存在同名项目")
+        guard let filename = (arguments["name"] ?? arguments["filename"] ?? arguments["input"])?
+            .stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !filename.isEmpty else {
+            throw ToolExecutionError.missingArgument(tool: identifier, argument: "name")
         }
-        guard NativeConfirmation.approve(
-            title: "移动文件？",
-            message: "\(source.path)\n→\n\(destination.path)",
-            confirmTitle: "移动"
-        ) else { throw ToolExecutionError.operationCancelled }
-        do {
-            try FileManager.default.moveItem(at: source, to: destination)
-        } catch {
-            throw ToolExecutionError.fileOperationFailed(error.localizedDescription)
+        guard filename != ".",
+              filename != "..",
+              !filename.contains("/"),
+              !filename.contains("\0"),
+              URL(fileURLWithPath: filename).lastPathComponent == filename else {
+            throw ToolExecutionError.fileOperationFailed("文件名不能包含路径或斜杠")
         }
-        return ToolExecutionOutput(value: .string(destination.path), displayText: "已移动到 `\(destination.path)`")
+        guard !URL(fileURLWithPath: filename).pathExtension.isEmpty else {
+            throw ToolExecutionError.fileOperationFailed("文件名必须包含后缀，例如 1.txt")
+        }
+
+        let fileManager = FileManager.default
+        let downloads = fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        try fileManager.createDirectory(at: downloads, withIntermediateDirectories: true)
+        let outputURL = downloads.appendingPathComponent(filename, isDirectory: false)
+        guard !fileManager.fileExists(atPath: outputURL.path) else {
+            throw ToolExecutionError.fileOperationFailed("下载目录中已经存在“\(filename)”")
+        }
+        guard fileManager.createFile(atPath: outputURL.path, contents: Data()) else {
+            throw ToolExecutionError.fileOperationFailed("无法在下载目录创建文件")
+        }
+
+        return ToolExecutionOutput(
+            value: .string(outputURL.path),
+            displayText: "已在下载目录创建空文件。",
+            artifacts: [outputURL]
+        )
     }
 }
 
@@ -875,7 +893,6 @@ private final class ModelGenerateTextTool: AssistantTool {
             prompt += "\n\n待处理内容：\n\(explicitInput)"
         }
 
-        let maxTokens = arguments["maxTokens"]?.integerValue ?? 900
         let explicitlyRequestsJSON = Self.explicitlyRequestsJSON(
             prompt: prompt,
             outputRequirement: context.skill.output
@@ -891,8 +908,7 @@ private final class ModelGenerateTextTool: AssistantTool {
         """
         let result = try await AIService.shared.generateText(
             prompt: prompt,
-            system: system,
-            maxTokens: max(64, min(maxTokens, 4_096))
+            system: system
         )
         guard !result.isEmpty else {
             throw ToolExecutionError.emptyToolResult(identifier)
@@ -1018,7 +1034,7 @@ final class ToolRegistry {
         register(FileListTool())
         register(FileSearchTool())
         register(FileRenameTool())
-        register(FileMoveTool())
+        register(FileCreateEmptyTool())
         register(FileTrashTool())
         register(SystemSnapshotTool())
         register(ModelGenerateTextTool())
@@ -1051,8 +1067,8 @@ final class ToolRegistry {
             return "file.search"
         case "file.rename", "files.rename":
             return "file.rename"
-        case "file.move", "files.move":
-            return "file.move"
+        case "file.create", "file.createempty", "files.create", "files.createempty":
+            return "file.createEmpty"
         case "file.trash", "files.trash", "file.delete", "files.delete":
             return "file.trash"
         case "system.snapshot", "system.metricssnapshot", "system.metrics", "process.topconsumers":
@@ -1130,6 +1146,7 @@ final class WorkflowEngine {
         var executedTools: [String] = []
         var finalDisplayText: String?
         var didWriteClipboard = false
+        var artifacts: [URL] = []
 
         for (index, step) in workflow.steps.enumerated() {
             try Task.checkCancellation()
@@ -1196,6 +1213,9 @@ final class WorkflowEngine {
                 if canonicalID == "clipboard.writeText" {
                     didWriteClipboard = true
                 }
+                for artifact in output.artifacts where !artifacts.contains(artifact) {
+                    artifacts.append(artifact)
+                }
                 progress?(
                     WorkflowExecutionProgress(
                         toolIdentifier: canonicalID,
@@ -1220,7 +1240,8 @@ final class WorkflowEngine {
         return WorkflowExecutionResult(
             outputText: outputText,
             executedTools: executedTools,
-            didWriteClipboard: didWriteClipboard
+            didWriteClipboard: didWriteClipboard,
+            artifacts: artifacts
         )
     }
 
