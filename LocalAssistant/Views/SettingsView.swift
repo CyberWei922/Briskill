@@ -16,22 +16,29 @@ struct SettingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                Color.clear
+                SettingsWindowDragRegion()
                     .frame(height: 58)
 
-                List(selection: $selection) {
+                ScrollView {
+                    LazyVStack(spacing: 3) {
                     ForEach(SettingsSection.allCases) { section in
-                        Label(section.title, systemImage: section.symbol)
-                            .tag(section)
+                            SettingsSidebarRow(
+                                section: section,
+                                isSelected: selection == section,
+                                accentColor: accentColor
+                            ) {
+                                selection = section
+                            }
+                        }
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
                 }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
             }
             .frame(width: 214)
             .settingsSidebarGlass()
 
-            Divider()
+            SettingsSplitSeam()
 
             rightDetail
                 .background(Color(nsColor: .windowBackgroundColor))
@@ -115,7 +122,7 @@ struct SettingsView: View {
         case .aiServices: AIProviderSettingsView()
         case .localModel: modelSettings
         case .skills: EmptyView()
-        case .privacy: privacySettings
+        case .privacy: PrivacySettingsView()
         }
     }
 
@@ -151,6 +158,12 @@ struct SettingsView: View {
                                     Circle()
                                         .fill(accent.color)
                                         .frame(width: 22, height: 22)
+                                        .overlay {
+                                            if accent == .system {
+                                                Circle()
+                                                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.8)
+                                            }
+                                        }
                                     if appAccent == accent.rawValue {
                                         Image(systemName: "checkmark")
                                             .font(.system(size: 9, weight: .bold))
@@ -194,21 +207,317 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var privacySettings: some View {
+}
+
+private struct PrivacySettingsView: View {
+    @ObservedObject private var permissions = PrivacyPermissionCenter.shared
+    @ObservedObject private var locations = AuthorizedLocationStore.shared
+    @ObservedObject private var aiSettings = AISettingsStore.shared
+
+    @State private var message: String?
+    @State private var messageIsError = false
+    @State private var permissionMessage: String?
+    @State private var permissionMessageIsError = false
+    @State private var confirmsLocalStorage = false
+
+    var body: some View {
         Form {
-            Section("本地优先") {
-                Label("API Key 保存在 macOS 钥匙串中", systemImage: "key.fill")
-                Label("自定义技能保存在 Application Support", systemImage: "externaldrive.fill")
-                Label("调用输入和结果历史保存在 Application Support，可单独删除或清空", systemImage: "clock.arrow.circlepath")
-                Label("创建技能时不会上传真实文件、截图或剪贴板内容", systemImage: "checkmark.shield")
+            Section("系统权限") {
+                PermissionSettingsRow(
+                    title: "辅助功能",
+                    detail: "读取和替换其他应用中由你主动选中的文字",
+                    symbol: "accessibility",
+                    granted: permissions.accessibilityGranted,
+                    actionTitle: permissions.accessibilityGranted ? "管理…" : "请求授权"
+                ) {
+                    if permissions.accessibilityGranted {
+                        permissions.openAccessibilitySettings()
+                    } else {
+                        permissions.requestAccessibility()
+                    }
+                }
+
+                PermissionSettingsRow(
+                    title: "屏幕录制",
+                    detail: "仅在运行区域截图技能时读取你框选的屏幕范围",
+                    symbol: "rectangle.dashed",
+                    granted: permissions.screenRecordingGranted,
+                    actionTitle: permissions.screenRecordingGranted ? "管理…" : "请求授权"
+                ) {
+                    if permissions.screenRecordingGranted {
+                        permissions.openScreenRecordingSettings()
+                    } else {
+                        permissions.requestScreenRecording()
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("文件与文件夹")
+                            Text("通过原生选择器逐个保存可访问位置；不会获得整个磁盘权限")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(locations.locations.isEmpty ? "按需选择" : "已保存 \(locations.locations.count) 个位置")
+                            .font(.caption)
+                            .foregroundStyle(locations.locations.isEmpty ? Color.secondary : Color.green)
+                        Button("添加位置…", action: chooseAuthorizedLocations)
+                    }
+
+                    ForEach(locations.locations) { location in
+                        HStack(spacing: 8) {
+                            Image(systemName: "folder.fill")
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(location.displayName)
+                                Text(location.originalPath)
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Button {
+                                locations.remove(location)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .help("移除这个持久访问位置")
+                        }
+                        .padding(.leading, 32)
+                    }
+                }
+                .padding(.vertical, 3)
+
+                Text("授权状态由 macOS 管理并通常会跨重启保留；你可以随时在系统设置中撤销。应用更新、签名或安装位置变化时，系统可能要求重新授权。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let permissionMessage {
+                    Label(
+                        permissionMessage,
+                        systemImage: permissionMessageIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(permissionMessageIsError ? Color.red : Color.green)
+                }
             }
-            Section("未来权限") {
-                LabeledContent("辅助功能", value: "未申请")
-                LabeledContent("屏幕录制", value: "未申请")
-                LabeledContent("文件访问", value: "未申请")
+
+            Section("API Key 保存位置") {
+                Picker("保存方式", selection: storageModeBinding) {
+                    ForEach(APIKeyStorageMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(aiSettings.apiKeyStorageMode.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if aiSettings.apiKeyStorageMode == .localFile {
+                    LabeledContent("本地文件") {
+                        Text(aiSettings.localAPIKeyFileURL?.path ?? "保存第一个密钥后创建")
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Button("在 Finder 中显示") {
+                        revealLocalAPIKeyFile()
+                    }
+                    .disabled(!localAPIKeyFileExists)
+                    Text("本地模式使用 0600 文件权限，仅允许当前 macOS 用户读取，但密钥仍是可查看的明文；不要把该文件同步、分享或加入 Git。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
+                if let message {
+                    Label(message, systemImage: messageIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(messageIsError ? Color.red : Color.green)
+                }
+            }
+
+            Section("无需单独授权") {
+                LabeledContent("剪贴板", value: "只在运行对应技能时访问")
+                LabeledContent("Apple Vision OCR", value: "图片识别完全在本机运行")
+                LabeledContent("系统状态", value: "仅读取本机公开诊断信息")
+                LabeledContent("网络请求", value: "仅云端 AI 技能使用")
+            }
+
+            Section("本地数据") {
+                Label("自定义技能、生成记录和调用历史保存在 Application Support", systemImage: "externaldrive.fill")
+                Label("创建技能时不会自动上传真实文件、截图或剪贴板内容", systemImage: "checkmark.shield")
             }
         }
         .formStyle(.grouped)
+        .onAppear { permissions.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            permissions.refresh()
+        }
+        .confirmationDialog(
+            "改用本地可查看文件？",
+            isPresented: $confirmsLocalStorage,
+            titleVisibility: .visible
+        ) {
+            Button("迁移并使用本地文件") {
+                changeStorageMode(to: .localFile)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("现有 API Key 会从钥匙串迁移到仅当前用户可读的 JSON 文件。该方式便于再次查看，但安全性低于钥匙串。")
+        }
+    }
+
+    private var storageModeBinding: Binding<APIKeyStorageMode> {
+        Binding(
+            get: { aiSettings.apiKeyStorageMode },
+            set: { newMode in
+                if newMode == .localFile {
+                    confirmsLocalStorage = true
+                } else {
+                    changeStorageMode(to: newMode)
+                }
+            }
+        )
+    }
+
+    private func changeStorageMode(to mode: APIKeyStorageMode) {
+        do {
+            try aiSettings.changeAPIKeyStorageMode(to: mode)
+            message = "API Key 已迁移到\(mode.displayName)"
+            messageIsError = false
+        } catch {
+            message = "迁移失败：\(error.localizedDescription)"
+            messageIsError = true
+        }
+    }
+
+    private func chooseAuthorizedLocations() {
+        let panel = NSOpenPanel()
+        panel.title = "添加 Local Assistant 可访问的位置"
+        panel.message = "选择的文件夹会通过系统安全书签保存，供文件搜索和整理技能在以后继续使用。"
+        panel.prompt = "授权此位置"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.begin { response in
+            guard response == .OK else { return }
+            do {
+                for url in panel.urls {
+                    try locations.add(url)
+                }
+                permissionMessage = "已保存 \(panel.urls.count) 个文件访问位置"
+                permissionMessageIsError = false
+            } catch {
+                permissionMessage = "文件授权保存失败：\(error.localizedDescription)"
+                permissionMessageIsError = true
+            }
+        }
+    }
+
+    private func revealLocalAPIKeyFile() {
+        guard let url = aiSettings.localAPIKeyFileURL else { return }
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
+    }
+
+    private var localAPIKeyFileExists: Bool {
+        guard let url = aiSettings.localAPIKeyFileURL else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+}
+
+private struct PermissionSettingsRow: View {
+    let title: String
+    let detail: String
+    let symbol: String
+    let granted: Bool
+    let actionTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Label(granted ? "已授权" : "未授权", systemImage: granted ? "checkmark.circle.fill" : "circle")
+                .font(.caption)
+                .foregroundStyle(granted ? Color.green : Color.secondary)
+            Button(actionTitle, action: action)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+private struct SettingsSplitSeam: View {
+    var body: some View {
+        ZStack {
+            // The settings window itself is transparent so Liquid Glass can sample
+            // the desktop. Give the split gutter an opaque backing; otherwise the
+            // translucent system Divider exposes a one-pixel strip behind the app.
+            Color(nsColor: .windowBackgroundColor)
+
+            Color.primary.opacity(0.12)
+                .frame(width: 0.5)
+        }
+        .frame(width: 1)
+        .frame(maxHeight: .infinity)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct SettingsWindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        SettingsWindowDragNSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class SettingsWindowDragNSView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
+private struct SettingsSidebarRow: View {
+    let section: SettingsSection
+    let isSelected: Bool
+    let accentColor: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(section.title, systemImage: section.symbol)
+                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+                .contentShape(Rectangle())
+                .background(
+                    isSelected ? accentColor : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -540,6 +849,18 @@ private struct SkillManagementView: View {
             message = SkillManagementMessage(text: "技能名称不能为空", isError: true)
             return
         }
+        skill.registeredKeyword = skill.registeredKeyword?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard skill.registeredKeyword?.isEmpty == false else {
+            message = SkillManagementMessage(text: "唯一索引不能为空", isError: true)
+            return
+        }
+        if let keyword = skill.registeredKeyword {
+            skill.aliases.removeAll { $0.compare(keyword, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
+        }
+        if let originalSkill = skillStore.skills.first(where: { $0.id == skill.id }) {
+            skill = migratingParameterReferences(from: originalSkill, to: skill)
+        }
         let parameterNames = skill.resolvedParameters.map {
             $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -569,6 +890,7 @@ private struct SkillManagementView: View {
                 skill.permissions.append("cloud_api")
             }
         }
+        skill.trigger = "用户输入 \(skill.executionExample)"
         skill.updatedAt = Date()
         do {
             try skillStore.save(skill)
@@ -576,6 +898,31 @@ private struct SkillManagementView: View {
         } catch {
             message = SkillManagementMessage(text: error.localizedDescription, isError: true)
         }
+    }
+
+    private func migratingParameterReferences(from original: UserSkill, to edited: UserSkill) -> UserSkill {
+        let originalNames = Dictionary(uniqueKeysWithValues: original.resolvedParameters.map { ($0.id, $0.name) })
+        let replacements = edited.resolvedParameters.reduce(into: [String: String]()) { result, parameter in
+            guard let oldName = originalNames[parameter.id], oldName != parameter.name else { return }
+            result[oldName] = parameter.name
+        }
+        guard !replacements.isEmpty else { return edited }
+
+        var migrated = edited
+        if var modelTask = migrated.modelTask {
+            modelTask.promptTemplate = modelTask.promptTemplate
+                .replacingSkillParameterPlaceholders(replacements)
+            modelTask.inputVariables = modelTask.inputVariables.map { replacements[$0] ?? $0 }
+            migrated.modelTask = modelTask
+        }
+        migrated.workflow = migrated.workflow?.map { step in
+            var migratedStep = step
+            migratedStep.arguments = step.arguments.mapValues {
+                $0.replacingParameterReferences(replacements)
+            }
+            return migratedStep
+        }
+        return migrated
     }
 
     private func delete(_ skill: UserSkill) {
@@ -641,9 +988,9 @@ private struct SkillManagementRow: View {
                             .background(Color.indigo.opacity(0.10), in: Capsule())
                     }
                 }
-                Text(skill.aliases.first ?? skill.summary)
+                Text(skill.executionExample)
                     .lineLimit(1)
-                    .font(.system(size: 9.5))
+                    .font(.system(size: 9.5, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -725,6 +1072,7 @@ private struct SkillEditorView: View {
             .offset(y: 3)
             .padding(.horizontal, 18)
             .frame(height: 50)
+            .background(Color(nsColor: .windowBackgroundColor))
             .overlay(alignment: .bottom) {
                 if isFormScrolled {
                     Divider()
@@ -735,26 +1083,40 @@ private struct SkillEditorView: View {
 
             Form {
                 Section("调用") {
-                    TextField("关键词和别名，用逗号分隔", text: aliasesBinding)
+                    LabeledContent("调用方式") {
+                        Text(skill.executionExample)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                    }
+                    TextField("唯一索引", text: registeredKeywordBinding)
+                        .textFieldStyle(.plain)
+                    TextField("搜索别名，用逗号分隔", text: aliasesBinding)
+                        .textFieldStyle(.plain)
                     Picker("执行模式", selection: executionModeBinding) {
                         ForEach(SkillExecutionMode.allCases) { mode in
                             Text(mode.displayName).tag(mode)
                         }
                     }
                     TextField("触发说明", text: $skill.trigger)
+                        .textFieldStyle(.plain)
                 }
 
                 Section("说明") {
                     TextField("技能摘要", text: $skill.summary, axis: .vertical)
                         .lineLimit(2...4)
+                        .textFieldStyle(.plain)
                     TextField("输出形式和内容", text: $skill.output, axis: .vertical)
                         .lineLimit(2...4)
+                        .textFieldStyle(.plain)
                 }
 
                 Section("执行步骤") {
                     TextEditor(text: actionsBinding)
                         .font(.system(size: 11.5, design: .monospaced))
                         .frame(minHeight: 82)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
                     Text("每行代表一个步骤。底层工作流仍保留在技能文件中。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -785,6 +1147,8 @@ private struct SkillEditorView: View {
                         TextEditor(text: modelPromptBinding)
                             .font(.system(size: 11.5, design: .monospaced))
                             .frame(minHeight: 100)
+                            .scrollContentBackground(.hidden)
+                            .background(Color.clear)
                         Text("参数使用 {{参数名称}} 引用。修改后请确认变量与上方参数一致。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -802,6 +1166,8 @@ private struct SkillEditorView: View {
                 }
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+            .background(Color(nsColor: .windowBackgroundColor))
             .trackSettingsScroll($isFormScrolled)
 
             Divider()
@@ -824,18 +1190,34 @@ private struct SkillEditorView: View {
             }
             .padding(.horizontal, 20)
             .frame(height: 48)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var aliasesBinding: Binding<String> {
         Binding(
-            get: { skill.aliases.joined(separator: ", ") },
+            get: {
+                skill.aliases
+                    .filter { alias in
+                        guard let keyword = skill.registeredKeyword else { return true }
+                        return alias.compare(keyword, options: [.caseInsensitive, .diacriticInsensitive]) != .orderedSame
+                    }
+                    .joined(separator: ", ")
+            },
             set: { value in
                 skill.aliases = value
                     .components(separatedBy: CharacterSet(charactersIn: ",，\n"))
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
             }
+        )
+    }
+
+    private var registeredKeywordBinding: Binding<String> {
+        Binding(
+            get: { skill.registeredKeyword ?? "" },
+            set: { skill.registeredKeyword = $0 }
         )
     }
 
@@ -911,6 +1293,7 @@ private struct SkillParameterEditorRow: View {
         VStack(spacing: 7) {
             HStack {
                 TextField("参数名称", text: $parameter.name)
+                    .textFieldStyle(.plain)
                 Picker("类型", selection: $parameter.type) {
                     ForEach(SkillParameterType.allCases) { type in
                         Text(type.displayName).tag(type)
@@ -929,6 +1312,7 @@ private struct SkillParameterEditorRow: View {
             }
             TextField("用途或格式说明", text: $parameter.description)
                 .font(.system(size: 11))
+                .textFieldStyle(.plain)
         }
         .padding(.vertical, 4)
     }
@@ -945,6 +1329,7 @@ private struct AIProviderSettingsView: View {
     @State private var endpoint = ""
     @State private var model = ""
     @State private var apiKey = ""
+    @State private var revealsAPIKey = false
     @State private var isTesting = false
     @State private var status: ConnectionStatus?
 
@@ -963,7 +1348,25 @@ private struct AIProviderSettingsView: View {
             }
 
             Section("连接配置") {
-                SecureField("API Key", text: $apiKey)
+                HStack {
+                    if settings.apiKeyStorageMode == .localFile, revealsAPIKey {
+                        TextField("API Key", text: $apiKey)
+                            .font(.system(.body, design: .monospaced))
+                    } else {
+                        SecureField("API Key", text: $apiKey)
+                    }
+                    if settings.apiKeyStorageMode == .localFile {
+                        Button {
+                            revealsAPIKey.toggle()
+                        } label: {
+                            Image(systemName: revealsAPIKey ? "eye.slash" : "eye")
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help(revealsAPIKey ? "隐藏 API Key" : "显示 API Key")
+                    }
+                }
                 TextField("模型名称", text: $model)
                 TextField("API 地址", text: $endpoint)
                     .font(.system(.body, design: .monospaced))
@@ -987,7 +1390,9 @@ private struct AIProviderSettingsView: View {
                             .foregroundStyle(status.isError ? Color.red : Color.green)
                             .lineLimit(2)
                     } else {
-                        Text("密钥只保存在这台 Mac 的钥匙串，不会写进工程或配置文件。")
+                        Text(settings.apiKeyStorageMode == .keychain
+                             ? "密钥保存在这台 Mac 的钥匙串，不会写进工程或配置文件。"
+                             : "密钥保存在本机 Application Support，可点击眼睛再次查看；不会写进工程目录。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1029,6 +1434,7 @@ private struct AIProviderSettingsView: View {
         endpoint = configuration.endpoint
         model = configuration.model
         apiKey = settings.apiKey(for: settings.selectedProvider)
+        revealsAPIKey = false
         status = nil
     }
 

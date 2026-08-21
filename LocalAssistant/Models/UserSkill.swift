@@ -35,6 +35,7 @@ enum SkillExecutionMode: String, Codable, CaseIterable, Identifiable {
 
 enum SkillParameterType: String, Codable, CaseIterable, Identifiable {
     case text
+    case paragraph
     case file
     case image
     case folder
@@ -46,6 +47,7 @@ enum SkillParameterType: String, Codable, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .text: "文本"
+        case .paragraph: "段落文字"
         case .file: "文件"
         case .image: "图片"
         case .folder: "文件夹"
@@ -57,6 +59,7 @@ enum SkillParameterType: String, Codable, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .text: "text.cursor"
+        case .paragraph: "text.alignleft"
         case .file: "doc"
         case .image: "photo"
         case .folder: "folder"
@@ -155,6 +158,22 @@ enum SkillJSONValue: Codable, Equatable {
         switch self {
         case .string(let value): "\"\(value)\""
         default: displayText
+        }
+    }
+
+    func replacingParameterReferences(_ replacements: [String: String]) -> SkillJSONValue {
+        switch self {
+        case .string(let value):
+            if value.hasPrefix("$"), let replacement = replacements[String(value.dropFirst())] {
+                return .string("$\(replacement)")
+            }
+            return .string(value.replacingSkillParameterPlaceholders(replacements))
+        case .array(let values):
+            return .array(values.map { $0.replacingParameterReferences(replacements) })
+        case .object(let values):
+            return .object(values.mapValues { $0.replacingParameterReferences(replacements) })
+        default:
+            return self
         }
     }
 }
@@ -319,7 +338,7 @@ struct UserSkill: Codable, Identifiable {
         id = UUID()
         name = draft.name
         let registeredKeyword = request.keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        aliases = Array(Set(draft.aliases + (registeredKeyword.isEmpty ? [] : [registeredKeyword])))
+        aliases = Array(Set(draft.aliases))
         self.registeredKeyword = registeredKeyword.nilIfEmpty
         summary = draft.summary
         originalRequest = request.naturalLanguageDescription
@@ -365,7 +384,7 @@ struct UserSkill: Codable, Identifiable {
     ) {
         self.id = id
         self.name = name
-        self.aliases = Array(Set([keyword] + aliases))
+        self.aliases = Array(Set(aliases))
         registeredKeyword = keyword
         self.summary = summary
         originalRequest = summary
@@ -393,7 +412,7 @@ struct UserSkill: Codable, Identifiable {
     }
 
     var searchTerms: [String] {
-        [name, summary, originalRequest] + aliases
+        [registeredKeyword].compactMap { $0 } + aliases + [name, summary, originalRequest]
     }
 
     var resolvedExecutionMode: SkillExecutionMode {
@@ -410,10 +429,6 @@ struct UserSkill: Codable, Identifiable {
 
     var executionExample: String {
         let command = registeredKeyword?.nilIfEmpty
-            ?? aliases.first(where: { alias in
-                !alias.contains(where: \.isWhitespace) && alias.unicodeScalars.allSatisfy(\.isASCII)
-            })?.nilIfEmpty
-            ?? aliases.first?.nilIfEmpty
             ?? name
         let arguments = resolvedParameters.map { parameter in
             let value = parameter.name.nilIfEmpty ?? parameter.type.displayName
@@ -427,5 +442,22 @@ private extension String {
     var nilIfEmpty: String? {
         let value = trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+}
+
+extension String {
+    func replacingSkillParameterPlaceholders(_ replacements: [String: String]) -> String {
+        var result = self
+        let staged = replacements.keys.sorted().enumerated().map { index, oldName in
+            (oldName, "__LOCAL_ASSISTANT_PARAMETER_\(index)__")
+        }
+        for (oldName, marker) in staged {
+            result = result.replacingOccurrences(of: "{{\(oldName)}}", with: marker)
+        }
+        for (oldName, marker) in staged {
+            guard let newName = replacements[oldName] else { continue }
+            result = result.replacingOccurrences(of: marker, with: "{{\(newName)}}")
+        }
+        return result
     }
 }

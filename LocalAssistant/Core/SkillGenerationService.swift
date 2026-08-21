@@ -195,7 +195,7 @@ final class SkillGenerationService {
         {
           "id": "稳定且唯一的参数 ID",
           "name": "参数显示名称",
-          "type": "text、file、image、folder、number 或 boolean",
+          "type": "text、paragraph、file、image、folder、number 或 boolean",
           "required": true,
           "description": "用户应该传入什么"
         }

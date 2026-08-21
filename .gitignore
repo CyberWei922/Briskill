@@ -3,4 +3,4 @@ DerivedData/
 build/
 *.xcuserstate
 xcuserdata/
-
+**/api-keys.json

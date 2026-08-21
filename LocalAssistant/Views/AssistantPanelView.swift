@@ -20,10 +20,12 @@ struct AssistantPanelView: View {
     @State private var pendingSkill: UserSkill?
     @State private var parameterValues: [String: String] = [:]
     @State private var parameterFiles: [String: [URL]] = [:]
-    @State private var tabCompletion: PanelTabCompletion?
+    @State private var externallySuppliedFileParameterIDs = Set<String>()
     @State private var requestStartedAt = Date()
     @State private var responseScrollEdges = PanelScrollEdges()
     @State private var executionActivity: PanelExecutionActivity?
+    @State private var pendingInvocationOptions = InvocationOptions.standard
+    @State private var activeInvocationOptions = InvocationOptions.standard
 
     var body: some View {
         panelContent
@@ -147,6 +149,9 @@ struct AssistantPanelView: View {
                     .onKeyPress(.tab) {
                         selectNextSuggestionWithTab() ? .handled : .ignored
                     }
+                    .onKeyPress(.space) {
+                        confirmSelectedSuggestionWithSpace() ? .handled : .ignored
+                    }
                     .onKeyPress(.downArrow) {
                         cycleSuggestion(by: 1) ? .handled : .ignored
                     }
@@ -164,6 +169,7 @@ struct AssistantPanelView: View {
                         .frame(maxWidth: 100)
                     Button {
                         parameterFiles[attachedFile.parameter.id] = []
+                        externallySuppliedFileParameterIDs.remove(attachedFile.parameter.id)
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.tertiary)
@@ -260,54 +266,12 @@ struct AssistantPanelView: View {
             responseView(response)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         } else if let pendingSkill {
-            parameterGuidanceView(for: pendingSkill)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+            Color.clear
+                .accessibilityLabel("已选择技能 \(pendingSkill.name)，请继续在上方输入参数")
         } else {
             recommendations
                 .transition(.opacity)
         }
-    }
-
-    private func parameterGuidanceView(for skill: UserSkill) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(skill.name)
-                        .font(.system(size: 14, weight: .semibold))
-                    Text("所有参数都在上方命令框中输入")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            HStack(spacing: 10) {
-                Image(systemName: nextUnfilledFileParameter == nil ? "text.cursor" : "paperclip")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(accentColor)
-                    .frame(width: 34, height: 34)
-                    .background(accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(nextInlineParameterHint.map { "下一项：\($0)" } ?? "参数已经齐全")
-                        .font(.system(size: 12.5, weight: .semibold))
-                    Text(parameterGuidanceDetail)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-            }
-            .padding(12)
-            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-
-            Text(skill.executionExample)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, 4)
-        .padding(.bottom, 8)
     }
 
     private var recommendations: some View {
@@ -354,7 +318,10 @@ struct AssistantPanelView: View {
                             badge: skill.isBuiltIn ? "内置技能" : (isPredicting ? "我的技能" : (index == 0 ? "最近创建" : "我的技能")),
                             isBestMatch: isPredicting && selectedSuggestionIndex == index
                         ) {
-                            run(skill)
+                            guard let command = skill.registeredKeyword?
+                                .trimmingCharacters(in: .whitespacesAndNewlines),
+                                  !command.isEmpty else { return }
+                            acceptCommand(.userSkill(skill), command: command, enteredText: "")
                         }
                     }
 
@@ -521,9 +488,20 @@ struct AssistantPanelView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
 
+            Button {
+                SettingsWindowController.shared.show()
+            } label: {
+                Label("设置", systemImage: "gearshape")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+
             Spacer()
 
             KeyHint(keys: "↩", label: "执行")
+            if isPredicting, pendingSkill == nil, selectedSuggestion != nil {
+                KeyHint(keys: "space", label: "选择")
+            }
             KeyHint(keys: "tab", label: "切换")
             KeyHint(keys: "esc", label: "关闭")
         }
@@ -635,9 +613,15 @@ struct AssistantPanelView: View {
             if parameter.type.acceptsFiles {
                 return (parameterFiles[parameter.id]?.isEmpty == false) ? nil : parameter.name
             }
-            return parameterValues[parameter.id]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                ? nil
-                : parameter.name
+            guard let value = parameterValues[parameter.id]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else {
+                return parameter.name
+            }
+            if parameter.type == .number, Double(value) == nil {
+                return "\(parameter.name)（请输入数字）"
+            }
+            return nil
         }
     }
 
@@ -659,28 +643,16 @@ struct AssistantPanelView: View {
 
     private var nextInlineParameterHint: String? {
         guard let pendingSkill else { return nil }
-        if let fileParameter = nextUnfilledFileParameter {
-            return fileParameter.name
-        }
-
-        let valueParameters = pendingSkill.resolvedParameters.filter { !$0.type.acceptsFiles }
-        guard !valueParameters.isEmpty else { return nil }
         let remainder = commandRemainder(for: pendingSkill, input: prompt)
-        if remainder.isEmpty { return valueParameters.first?.name }
-        guard prompt.last?.isWhitespace == true else { return nil }
-        let completedCount = splitCommandArguments(remainder).count
-        guard valueParameters.indices.contains(completedCount) else { return nil }
-        return valueParameters[completedCount].name
-    }
-
-    private var parameterGuidanceDetail: String {
-        if let fileParameter = nextUnfilledFileParameter {
-            return "从上方回形针选择，或把\(fileParameter.type.displayName)拖入上方输入框"
+        let nextParameter = pendingSkill.resolvedParameters.first { parameter in
+            if parameter.type.acceptsFiles {
+                return parameterFiles[parameter.id]?.isEmpty != false
+            }
+            return parameterValues[parameter.id]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
         }
-        if let nextInlineParameterHint {
-            return "继续在上方输入“\(nextInlineParameterHint)”"
-        }
-        return missingRequiredParameters.isEmpty ? "按回车立即执行" : "还需：\(missingRequiredParameters.joined(separator: "、"))"
+        guard let nextParameter else { return nil }
+        if remainder.isEmpty { return nextParameter.name }
+        return prompt.last?.isWhitespace == true ? nextParameter.name : nil
     }
 
     private var recommendedSkills: [FeatureItem] {
@@ -732,14 +704,6 @@ struct AssistantPanelView: View {
             return PanelInlineCompletion(commandSuffix: "", parameterHint: nextInlineParameterHint)
         }
 
-        if let tabCompletion, tabCompletion.sourcePrompt == prompt {
-            let suffix = commandSuffix(command: tabCompletion.command, query: tabCompletion.sourcePrompt) ?? ""
-            return PanelInlineCompletion(
-                commandSuffix: suffix,
-                parameterHint: tabCompletion.parameterHint
-            )
-        }
-
         guard let selectedSuggestion,
               let command = preferredCommand(for: selectedSuggestion, query: trimmedPrompt),
               normalized(command) != normalized(trimmedPrompt),
@@ -758,7 +722,10 @@ struct AssistantPanelView: View {
         let terms: [String]
         switch suggestion {
         case .userSkill(let skill):
-            terms = [skill.registeredKeyword].compactMap { $0 } + skill.aliases + [skill.name]
+            guard let command = skill.registeredKeyword?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !command.isEmpty else { return nil }
+            return normalized(command).hasPrefix(normalized(query)) ? command : nil
         case .builtIn(let skill):
             terms = [skill.commandName, skill.id] + skill.searchTerms
         }
@@ -780,38 +747,39 @@ struct AssistantPanelView: View {
     private func cycleSuggestion(by offset: Int) -> Bool {
         let count = visibleSuggestionTargets.count
         guard isPredicting, count > 0 else { return false }
-        tabCompletion = nil
         selectedSuggestionIndex = (selectedSuggestionIndex + offset + count) % count
         return true
     }
 
     @discardableResult
     private func selectNextSuggestionWithTab() -> Bool {
-        guard cycleSuggestion(by: 1),
-              let selectedSuggestion,
-              let command = preferredCommand(for: selectedSuggestion, query: trimmedPrompt) else {
+        guard pendingSkill == nil, cycleSuggestion(by: 1) else { return false }
+        if let selectedSuggestion {
+            AppConsole.shared.info(
+                "Tab 已切换候选：\(suggestionName(selectedSuggestion))",
+                category: "Assistant"
+            )
+        }
+        return true
+    }
+
+    @discardableResult
+    private func confirmSelectedSuggestionWithSpace() -> Bool {
+        guard pendingSkill == nil,
+              !trimmedPrompt.isEmpty,
+              !trimmedPrompt.contains(where: \.isWhitespace),
+              let selectedSuggestion else {
             return false
         }
 
-        let parameterHint: String?
         switch selectedSuggestion {
         case .userSkill(let skill):
-            parameterHint = skill.resolvedParameters.first?.name
+            guard let command = skill.registeredKeyword?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !command.isEmpty else { return false }
+            acceptCommand(.userSkill(skill), command: command, enteredText: "")
         case .builtIn(let skill):
-            let parts = skill.executionExample.split(maxSplits: 1, whereSeparator: \.isWhitespace)
-            parameterHint = parts.count > 1 ? String(parts[1]) : nil
+            acceptCommand(.builtIn(skill), command: skill.commandName, enteredText: "")
         }
-
-        tabCompletion = PanelTabCompletion(
-            sourcePrompt: prompt,
-            command: command,
-            parameterHint: parameterHint,
-            target: selectedSuggestion
-        )
-        AppConsole.shared.info(
-            "Tab 已预选命令：\(command)；下一参数=\(parameterHint ?? "无")",
-            category: "Assistant"
-        )
         return true
     }
 
@@ -824,7 +792,6 @@ struct AssistantPanelView: View {
         }
 
         if let pendingSkill {
-            tabCompletion = nil
             guard commandMatches(skill: pendingSkill, input: newValue) else {
                 cancelParameterEntry(clearPrompt: false)
                 return
@@ -833,36 +800,17 @@ struct AssistantPanelView: View {
             return
         }
 
-        if let tabCompletion,
-           oldValue == tabCompletion.sourcePrompt,
-           newValue.hasPrefix(oldValue),
-           newValue.count > oldValue.count {
-            let enteredStart = newValue.index(newValue.startIndex, offsetBy: oldValue.count)
-            let enteredText = String(newValue[enteredStart...].drop(while: \.isWhitespace))
-            acceptCommand(tabCompletion.target, command: tabCompletion.command, enteredText: enteredText)
-            return
-        }
+    }
 
-        tabCompletion = nil
-        let oldQuery = oldValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !oldQuery.isEmpty,
-              !oldQuery.contains(where: \.isWhitespace),
-              newValue.hasPrefix(oldValue),
-              newValue.count > oldValue.count else {
-            return
+    private func suggestionName(_ suggestion: PanelSuggestionTarget) -> String {
+        switch suggestion {
+        case .userSkill(let skill): skill.name
+        case .builtIn(let skill): skill.title
         }
-        let appendedStart = newValue.index(newValue.startIndex, offsetBy: oldValue.count)
-        let appended = newValue[appendedStart...]
-        guard appended.allSatisfy(\.isWhitespace),
-              let suggestion = suggestionTarget(for: oldQuery, index: selectedSuggestionIndex),
-              let command = preferredCommand(for: suggestion, query: oldQuery) else {
-            return
-        }
-        acceptCommand(suggestion, command: command, enteredText: "")
     }
 
     private func clearPanelForEmptyPrompt() {
-        if isThinking, !submittedPrompt.isEmpty {
+        if isThinking, !submittedPrompt.isEmpty, activeInvocationOptions.savesHistory {
             InvocationHistoryStore.shared.add(
                 InvocationRecord(
                     id: requestID,
@@ -886,6 +834,7 @@ struct AssistantPanelView: View {
         submittedPrompt = ""
         copied = false
         executionActivity = nil
+        activeInvocationOptions = .standard
 
         withAnimation(.easeOut(duration: 0.14)) {
             isThinking = false
@@ -896,19 +845,11 @@ struct AssistantPanelView: View {
         AppConsole.shared.info("输入已清空，快捷面板恢复默认状态", category: "Assistant")
     }
 
-    private func suggestionTarget(for query: String, index: Int) -> PanelSuggestionTarget? {
-        let targets = Array(predictedUserSkills(for: query).prefix(4))
-            .map(PanelSuggestionTarget.userSkill)
-        guard !targets.isEmpty else { return nil }
-        return targets[min(index, targets.count - 1)]
-    }
-
     private func acceptCommand(
         _ target: PanelSuggestionTarget,
         command: String,
         enteredText: String
     ) {
-        tabCompletion = nil
         let rewrittenInput = command + " " + enteredText
         AppConsole.shared.info(
             "已锁定命令：\(command)；后续内容在顶部输入线作为参数接收",
@@ -936,12 +877,27 @@ struct AssistantPanelView: View {
             .map(String.init) else {
             return false
         }
-        return commandTerms(for: skill).contains { normalized($0) == normalized(command) }
+        guard let registeredKeyword = skill.registeredKeyword else { return false }
+        return normalized(registeredKeyword) == normalized(command)
     }
 
     private func refreshInlineArguments(for skill: UserSkill, input: String) {
         parameterValues = [:]
-        applyInlineArguments(commandRemainder(for: skill, input: input), to: skill.resolvedParameters)
+        let parsed = CommandInvocationParser.parse(
+            commandRemainder(for: skill, input: input),
+            parameters: skill.resolvedParameters,
+            suppliedParameterIDs: externallySuppliedFileParameterIDs
+        )
+        parameterValues = parsed.values
+        pendingInvocationOptions = parsed.options
+        for parameter in skill.resolvedParameters where parameter.type.acceptsFiles {
+            if !externallySuppliedFileParameterIDs.contains(parameter.id) {
+                parameterFiles[parameter.id] = nil
+            }
+        }
+        for (parameterID, url) in parsed.fileURLs {
+            parameterFiles[parameterID] = [url]
+        }
     }
 
     private func predictedSkills(for rawQuery: String) -> [FeatureItem] {
@@ -992,12 +948,15 @@ struct AssistantPanelView: View {
         return skillStore.skills
             .filter(\.isEnabled)
             .compactMap { skill -> (skill: UserSkill, score: Int)? in
-                let scores = skill.searchTerms.compactMap { term -> Int? in
+                let registeredKeyword = skill.registeredKeyword.map(normalized)
+                let scores = skill.searchTerms.enumerated().compactMap { index, term -> Int? in
                     let candidate = normalized(term)
-                    if candidate == query { return 0 }
-                    if candidate.hasPrefix(query) { return 10 + candidate.count - query.count }
+                    let isRegisteredKeyword = candidate == registeredKeyword
+                    let sourcePenalty = isRegisteredKeyword ? 0 : 40 + index
+                    if candidate == query { return sourcePenalty }
+                    if candidate.hasPrefix(query) { return sourcePenalty + 10 + candidate.count - query.count }
                     if query.count >= 2, let range = candidate.range(of: query) {
-                        return 100 + candidate.distance(from: candidate.startIndex, to: range.lowerBound)
+                        return sourcePenalty + 100 + candidate.distance(from: candidate.startIndex, to: range.lowerBound)
                     }
                     return nil
                 }
@@ -1023,19 +982,10 @@ struct AssistantPanelView: View {
         }
         guard !trimmedPrompt.isEmpty else { return }
 
-        if let selectedSuggestion {
-            switch selectedSuggestion {
-            case .userSkill(let userSkill):
-                AppConsole.shared.info("输入已匹配用户技能：\(userSkill.name)", category: "Assistant")
-                run(userSkill)
-            case .builtIn(let builtIn):
-                AppConsole.shared.info("输入已匹配内置技能：\(builtIn.id)", category: "Assistant")
-                run(builtIn)
-            }
-            return
-        }
-
-        if let userSkill = predictedUserSkills(for: trimmedPrompt).first {
+        let command = trimmedPrompt.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+        if let userSkill = skillStore.skills.first(where: { skill in
+            skill.isEnabled && skill.registeredKeyword.map { normalized($0) == normalized(command) } == true
+        }) {
             AppConsole.shared.info("输入已匹配用户技能：\(userSkill.name)", category: "Assistant")
             run(userSkill)
             return
@@ -1052,7 +1002,17 @@ struct AssistantPanelView: View {
         let input = trimmedPrompt.isEmpty ? skill.name : trimmedPrompt
         prompt = input
         guard !skill.resolvedParameters.isEmpty else {
-            submit(skill, input: input, values: [:], files: [:])
+            let parsed = CommandInvocationParser.parse(
+                commandRemainder(for: skill, input: input),
+                parameters: []
+            )
+            submit(
+                skill,
+                input: runtimeInput(for: skill, values: [:], files: [:]),
+                values: [:],
+                files: [:],
+                options: parsed.options
+            )
             return
         }
         let hasInlineArguments = !commandRemainder(for: skill, input: input).isEmpty
@@ -1070,6 +1030,7 @@ struct AssistantPanelView: View {
         pendingSkill = skill
         response = nil
         parameterFiles = [:]
+        externallySuppliedFileParameterIDs = []
         refreshInlineArguments(for: skill, input: input)
         let acceptsFiles = skill.resolvedParameters.contains(where: { $0.type.acceptsFiles })
         PanelController.shared.setInteractionPinned(acceptsFiles)
@@ -1082,80 +1043,52 @@ struct AssistantPanelView: View {
 
     private func executePendingSkill() {
         guard let skill = pendingSkill, missingRequiredParameters.isEmpty else { return }
-        let input = trimmedPrompt.isEmpty ? skill.name : trimmedPrompt
         let values = parameterValues
         let files = parameterFiles
+        let options = pendingInvocationOptions
+        let input = runtimeInput(for: skill, values: values, files: files)
         cancelParameterEntry(clearPrompt: false)
-        submit(skill, input: input, values: values, files: files)
+        submit(skill, input: input, values: values, files: files, options: options)
+    }
+
+    private func runtimeInput(
+        for skill: UserSkill,
+        values: [String: String],
+        files: [String: [URL]]
+    ) -> String {
+        var components = [skill.registeredKeyword ?? skill.name]
+        for parameter in skill.resolvedParameters {
+            if parameter.type.acceptsFiles, let url = files[parameter.id]?.first {
+                components.append(url.path)
+            } else if let value = values[parameter.id], !value.isEmpty {
+                components.append(value)
+            }
+        }
+        return components.joined(separator: " ")
     }
 
     private func cancelParameterEntry(clearPrompt: Bool) {
         pendingSkill = nil
-        tabCompletion = nil
         parameterValues = [:]
         parameterFiles = [:]
+        externallySuppliedFileParameterIDs = []
+        pendingInvocationOptions = .standard
         PanelController.shared.setInteractionPinned(false)
         if clearPrompt { prompt = "" }
     }
 
     private func commandRemainder(for skill: UserSkill, input: String) -> String {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        let terms = commandTerms(for: skill).sorted { $0.count > $1.count }
-        guard let term = terms.first(where: { candidate in
+        guard let term = skill.registeredKeyword?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !term.isEmpty,
+              {
             let normalizedInput = normalized(trimmed)
-            let normalizedCandidate = normalized(candidate)
+            let normalizedCandidate = normalized(term)
             return normalizedInput == normalizedCandidate
                 || normalizedInput.hasPrefix(normalizedCandidate + " ")
-        }) else { return "" }
+        }() else { return "" }
         let index = trimmed.index(trimmed.startIndex, offsetBy: min(term.count, trimmed.count))
         return String(trimmed[index...]).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func commandTerms(for skill: UserSkill) -> [String] {
-        [skill.registeredKeyword].compactMap { $0 } + skill.aliases + [skill.name]
-    }
-
-    private func applyInlineArguments(_ rawValue: String, to parameters: [SkillParameterDefinition]) {
-        guard !rawValue.isEmpty else { return }
-        let valueParameters = parameters.filter { !$0.type.acceptsFiles }
-        let fileParameters = parameters.filter(\.type.acceptsFiles)
-
-        if valueParameters.count == 1, let parameter = valueParameters.first {
-            parameterValues[parameter.id] = rawValue
-        } else {
-            let values = splitCommandArguments(rawValue)
-            for (parameter, value) in zip(valueParameters, values) {
-                parameterValues[parameter.id] = value
-            }
-        }
-
-        let possiblePath = (rawValue as NSString).expandingTildeInPath
-        if let fileParameter = fileParameters.first,
-           FileManager.default.fileExists(atPath: possiblePath) {
-            addFiles([URL(fileURLWithPath: possiblePath)], to: fileParameter)
-        }
-    }
-
-    private func splitCommandArguments(_ value: String) -> [String] {
-        var result: [String] = []
-        var current = ""
-        var quote: Character?
-        for character in value {
-            if character == "\"" || character == "'" {
-                if quote == character { quote = nil }
-                else if quote == nil { quote = character }
-                else { current.append(character) }
-            } else if character.isWhitespace && quote == nil {
-                if !current.isEmpty {
-                    result.append(current)
-                    current = ""
-                }
-            } else {
-                current.append(character)
-            }
-        }
-        if !current.isEmpty { result.append(current) }
-        return result
     }
 
     private func chooseFiles(for parameter: SkillParameterDefinition) {
@@ -1190,6 +1123,7 @@ struct AssistantPanelView: View {
             return
         }
         parameterFiles[parameter.id] = [url]
+        externallySuppliedFileParameterIDs.insert(parameter.id)
         AppConsole.shared.info("参数“\(parameter.name)”已接收：\(url.lastPathComponent)", category: "Assistant")
     }
 
@@ -1214,6 +1148,7 @@ struct AssistantPanelView: View {
         requestID = currentRequestID
         requestStartedAt = Date()
         submittedPrompt = trimmed
+        activeInvocationOptions = .standard
         copied = false
         executionActivity = preferredSkill == nil
             ? .preparing(scope: .cloud, toolIdentifier: "model.generateText")
@@ -1294,13 +1229,15 @@ struct AssistantPanelView: View {
         _ skill: UserSkill,
         input: String,
         values: [String: String],
-        files: [String: [URL]]
+        files: [String: [URL]],
+        options: InvocationOptions = .standard
     ) {
         let currentRequestID = UUID()
         activeTask?.cancel()
         requestID = currentRequestID
         requestStartedAt = Date()
         submittedPrompt = input
+        activeInvocationOptions = options
         copied = false
         let plannedScope = executionScope(for: skill)
         let firstTool = skill.workflow?.first.map {
@@ -1308,7 +1245,7 @@ struct AssistantPanelView: View {
         } ?? (plannedScope == .local ? "local.match" : "model.generateText")
         executionActivity = .preparing(scope: plannedScope, toolIdentifier: firstTool)
         AppConsole.shared.info(
-            "开始执行用户技能：\(skill.name)；输入字符数=\(input.count)，文本参数=\(values.count)，文件参数=\(files.values.flatMap { $0 }.count)",
+            "开始执行用户技能：\(skill.name)；输入字符数=\(input.count)，文本参数=\(values.count)，文件参数=\(files.values.flatMap { $0 }.count)，保存历史=\(options.savesHistory ? "是" : "否")",
             category: "Assistant"
         )
 
@@ -1480,20 +1417,24 @@ struct AssistantPanelView: View {
         guard requestID == expectedID else { return }
         let status = explicitStatus
             ?? (newResponse.icon.contains("exclamationmark") ? .failed : .completed)
-        InvocationHistoryStore.shared.add(
-            InvocationRecord(
-                id: expectedID,
-                startedAt: requestStartedAt,
-                endedAt: Date(),
-                status: status,
-                input: submittedPrompt,
-                title: newResponse.title,
-                source: newResponse.skillName,
-                result: newResponse.body,
-                tools: tools,
-                didWriteClipboard: didWriteClipboard
+        if activeInvocationOptions.savesHistory {
+            InvocationHistoryStore.shared.add(
+                InvocationRecord(
+                    id: expectedID,
+                    startedAt: requestStartedAt,
+                    endedAt: Date(),
+                    status: status,
+                    input: submittedPrompt,
+                    title: newResponse.title,
+                    source: newResponse.skillName,
+                    result: newResponse.body,
+                    tools: tools,
+                    didWriteClipboard: didWriteClipboard
+                )
             )
-        )
+        } else {
+            AppConsole.shared.info("本次调用包含 -clear，未写入调用历史", category: "Assistant")
+        }
         withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
             isThinking = false
             response = newResponse
@@ -1531,7 +1472,7 @@ struct AssistantPanelView: View {
     }
 
     private func resetConversation() {
-        if isThinking, !submittedPrompt.isEmpty {
+        if isThinking, !submittedPrompt.isEmpty, activeInvocationOptions.savesHistory {
             InvocationHistoryStore.shared.add(
                 InvocationRecord(
                     id: requestID,
@@ -1557,6 +1498,7 @@ struct AssistantPanelView: View {
         isThinking = false
         copied = false
         executionActivity = nil
+        activeInvocationOptions = .standard
         searchIsFocused = true
         AppConsole.shared.info("已新建面板会话", category: "Assistant")
     }
@@ -1638,13 +1580,6 @@ private struct PanelScrollEdgeMask: View {
             .frame(height: 30)
         }
     }
-}
-
-private struct PanelTabCompletion {
-    let sourcePrompt: String
-    let command: String
-    let parameterHint: String?
-    let target: PanelSuggestionTarget
 }
 
 private struct PanelInlineCompletion {

@@ -344,6 +344,10 @@ struct SkillCreatorView: View {
     }
 
     private func performPrimaryAction() {
+        if let keywordValidationError {
+            message = CreatorMessage(text: keywordValidationError, details: nil, isError: true)
+            return
+        }
         if mode == .guided && guidedStep < 3 {
             guard guidedStepCanAdvance else { return }
             withAnimation(.easeInOut(duration: 0.18)) {
@@ -373,6 +377,10 @@ struct SkillCreatorView: View {
 
     private func generate() {
         guard canGenerate else { return }
+        if let keywordValidationError {
+            message = CreatorMessage(text: keywordValidationError, details: nil, isError: true)
+            return
+        }
         generationTask?.cancel()
 
         let currentRequest = request
@@ -480,6 +488,19 @@ struct SkillCreatorView: View {
                 AppConsole.shared.error("技能生成失败：\(error.localizedDescription)", category: "SkillCreator")
             }
         }
+    }
+
+    private var keywordValidationError: String? {
+        let value = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return "唯一索引不能为空" }
+        guard !value.contains(where: \.isWhitespace), !value.hasPrefix("-") else {
+            return "唯一索引不能包含空格，也不能以“-”开头"
+        }
+        let isDuplicate = skillStore.skills.contains { skill in
+            guard let existing = skill.registeredKeyword else { return false }
+            return existing.compare(value, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
+        return isDuplicate ? "唯一索引“\(value)”已被其他技能使用" : nil
     }
 
     private func stopGeneration() {

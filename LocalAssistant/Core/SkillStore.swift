@@ -1,5 +1,22 @@
 import Foundation
 
+enum SkillStoreError: LocalizedError {
+    case missingRegisteredKeyword
+    case invalidRegisteredKeyword
+    case duplicateRegisteredKeyword(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingRegisteredKeyword:
+            "技能必须设置一个唯一索引"
+        case .invalidRegisteredKeyword:
+            "索引不能包含空格，也不能以“-”开头"
+        case .duplicateRegisteredKeyword(let keyword):
+            "索引“\(keyword)”已被其他技能使用"
+        }
+    }
+}
+
 struct LocalAssistantSkillPackage: Codable {
     static let formatIdentifier = "com.localassistant.skill"
     static let currentSchemaVersion = 1
@@ -34,6 +51,22 @@ final class SkillStore: ObservableObject {
     }
 
     func save(_ skill: UserSkill) throws {
+        var skill = skill
+        let keyword = skill.registeredKeyword?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !keyword.isEmpty else { throw SkillStoreError.missingRegisteredKeyword }
+        guard !keyword.contains(where: \.isWhitespace), !keyword.hasPrefix("-") else {
+            throw SkillStoreError.invalidRegisteredKeyword
+        }
+        let normalizedKeyword = normalizedIndex(keyword)
+        if skills.contains(where: { existing in
+            existing.id != skill.id
+                && existing.registeredKeyword.map(normalizedIndex) == normalizedKeyword
+        }) {
+            throw SkillStoreError.duplicateRegisteredKeyword(keyword)
+        }
+        skill.registeredKeyword = keyword
+
         let previousSkills = skills
         if let index = skills.firstIndex(where: { $0.id == skill.id }) {
             skills[index] = skill
@@ -47,6 +80,13 @@ final class SkillStore: ObservableObject {
             throw error
         }
         AppConsole.shared.success("技能已保存：\(skill.name)（\(skill.id.uuidString)）", category: "SkillStore")
+    }
+
+    private func normalizedIndex(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        )
     }
 
     func delete(_ skill: UserSkill) throws {

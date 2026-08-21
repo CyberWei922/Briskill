@@ -42,6 +42,7 @@ enum ToolExecutionError: LocalizedError {
     case unsupportedFileInput
     case emptyToolResult(String)
     case accessibilityPermissionRequired
+    case screenRecordingPermissionRequired
     case noSelectedText
     case invalidPath(String)
     case unsupportedFileType(String)
@@ -71,6 +72,8 @@ enum ToolExecutionError: LocalizedError {
             "工具 \(tool) 没有返回可用结果。"
         case .accessibilityPermissionRequired:
             "需要“辅助功能”权限才能读取或替换其他应用中的选中文字。请在系统设置 → 隐私与安全性 → 辅助功能中允许 Local Assistant。"
+        case .screenRecordingPermissionRequired:
+            "需要“屏幕录制”权限才能进行区域截图。请在设置 → 隐私与权限中授权 Local Assistant；系统可能要求重新启动应用。"
         case .noSelectedText:
             "当前应用中没有可读取的选中文字，或者该应用不支持系统选区接口。"
         case .invalidPath(let path):
@@ -448,6 +451,10 @@ private final class ScreenCaptureRegionTool: AssistantTool {
         arguments: [String: SkillJSONValue],
         context: ToolExecutionContext
     ) async throws -> ToolExecutionOutput {
+        guard CGPreflightScreenCaptureAccess() else {
+            PrivacyPermissionCenter.shared.requestScreenRecording()
+            throw ToolExecutionError.screenRecordingPermissionRequired
+        }
         let capturesDirectory = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -615,6 +622,8 @@ private final class FileSearchTool: AssistantTool {
             throw ToolExecutionError.missingArgument(tool: identifier, argument: "query")
         }
         let limit = max(1, min(arguments["limit"]?.integerValue ?? 30, 100))
+        var authorizedAccess: [ResolvedAuthorizedLocation] = []
+        defer { authorizedAccess.forEach { $0.stopAccessing() } }
         let roots: [URL]
         if arguments["directory"] != nil || arguments["root"] != nil {
             roots = [try ToolPathResolver.existingURL(
@@ -624,9 +633,16 @@ private final class FileSearchTool: AssistantTool {
             )]
         } else {
             let home = FileManager.default.homeDirectoryForCurrentUser
-            roots = ["Desktop", "Documents", "Downloads"]
+            let standardRoots = ["Desktop", "Documents", "Downloads"]
                 .map { home.appendingPathComponent($0, isDirectory: true) }
                 .filter { FileManager.default.fileExists(atPath: $0.path) }
+            authorizedAccess = AuthorizedLocationStore.shared.beginAccessingLocations()
+            let allRoots = standardRoots + authorizedAccess.map(\.url)
+            roots = allRoots.reduce(into: [URL]()) { result, url in
+                if !result.contains(where: { $0.standardizedFileURL.path == url.standardizedFileURL.path }) {
+                    result.append(url)
+                }
+            }
         }
 
         let matches = try await search(query: query, roots: roots, limit: limit)

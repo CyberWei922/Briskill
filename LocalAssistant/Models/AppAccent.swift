@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 enum AppAccent: String, CaseIterable, Identifiable {
+    case system
     case purple
     case blue
     case cyan
@@ -13,6 +14,7 @@ enum AppAccent: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
+        case .system: "跟随系统"
         case .purple: "紫色"
         case .blue: "蓝色"
         case .cyan: "青色"
@@ -24,6 +26,7 @@ enum AppAccent: String, CaseIterable, Identifiable {
 
     var color: Color {
         switch self {
+        case .system: Color(nsColor: .controlAccentColor)
         case .purple: .indigo
         case .blue: .blue
         case .cyan: .cyan

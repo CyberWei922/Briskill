@@ -7,6 +7,8 @@ final class PanelController: NSObject, NSWindowDelegate {
     static let shared = PanelController()
 
     private var panel: AssistantPanel?
+    private let savedOriginXKey = "assistantPanel.origin.x"
+    private let savedOriginYKey = "assistantPanel.origin.y"
     private let inputSourceSession = KeyboardInputSourceSession()
     private var isInteractionPinned = false
     private var isPerformingSystemInteraction = false
@@ -23,10 +25,16 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     func show() {
         SelectionContextStore.shared.captureBeforePanelActivation()
-        let panel = panel ?? makePanel()
-        self.panel = panel
+        let panel: AssistantPanel
+        if let existingPanel = self.panel {
+            panel = existingPanel
+            keepOnAvailableScreen(panel)
+        } else {
+            panel = makePanel()
+            self.panel = panel
+            restorePositionOrUseDefault(panel)
+        }
 
-        position(panel)
         NSApplication.shared.activate(ignoringOtherApps: true)
         inputSourceSession.beginInEnglish()
         panel.makeKeyAndOrderFront(nil)
@@ -94,7 +102,31 @@ final class PanelController: NSObject, NSWindowDelegate {
         AppConsole.shared.info("快捷面板失去焦点并隐藏", category: "Panel")
     }
 
-    private func position(_ panel: NSPanel) {
+    func windowDidMove(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window === panel else { return }
+        UserDefaults.standard.set(window.frame.origin.x, forKey: savedOriginXKey)
+        UserDefaults.standard.set(window.frame.origin.y, forKey: savedOriginYKey)
+    }
+
+    private func restorePositionOrUseDefault(_ panel: NSPanel) {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: savedOriginXKey) != nil,
+              defaults.object(forKey: savedOriginYKey) != nil else {
+            positionAtDefaultLocation(panel)
+            return
+        }
+
+        panel.setFrameOrigin(
+            NSPoint(
+                x: defaults.double(forKey: savedOriginXKey),
+                y: defaults.double(forKey: savedOriginYKey)
+            )
+        )
+        keepOnAvailableScreen(panel)
+    }
+
+    private func positionAtDefaultLocation(_ panel: NSPanel) {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else {
             panel.center()
             return
@@ -106,6 +138,38 @@ final class PanelController: NSObject, NSWindowDelegate {
             y: visibleFrame.maxY - panel.frame.height - 72
         )
         panel.setFrameOrigin(origin)
+    }
+
+    private func keepOnAvailableScreen(_ panel: NSPanel) {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+
+        let currentFrame = panel.frame
+        let bestScreen = screens.max { lhs, rhs in
+            intersectionArea(currentFrame, lhs.visibleFrame) < intersectionArea(currentFrame, rhs.visibleFrame)
+        }
+        guard let bestScreen,
+              intersectionArea(currentFrame, bestScreen.visibleFrame) > 0 else {
+            positionAtDefaultLocation(panel)
+            return
+        }
+
+        let visibleFrame = bestScreen.visibleFrame.insetBy(dx: 10, dy: 10)
+        let maximumX = max(visibleFrame.minX, visibleFrame.maxX - currentFrame.width)
+        let maximumY = max(visibleFrame.minY, visibleFrame.maxY - currentFrame.height)
+        let clampedOrigin = NSPoint(
+            x: min(max(currentFrame.origin.x, visibleFrame.minX), maximumX),
+            y: min(max(currentFrame.origin.y, visibleFrame.minY), maximumY)
+        )
+        if clampedOrigin != currentFrame.origin {
+            panel.setFrameOrigin(clampedOrigin)
+        }
+    }
+
+    private func intersectionArea(_ lhs: NSRect, _ rhs: NSRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return 0 }
+        return intersection.width * intersection.height
     }
 }
 
@@ -176,7 +240,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.backgroundColor = .clear
         window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .automatic
-        window.isMovableByWindowBackground = true
+        // Keep controls and text in the full-size content view interactive.
+        // The native titlebar remains the only window dragging region.
+        window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 680, height: 520)
         window.setFrameAutosaveName("LocalAssistant.SettingsWindow")
