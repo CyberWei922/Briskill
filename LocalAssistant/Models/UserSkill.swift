@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum SkillCreationMode: String, Codable, CaseIterable, Identifiable {
@@ -13,23 +14,50 @@ enum SkillOrigin: String, Codable {
 }
 
 enum SkillExecutionMode: String, Codable, CaseIterable, Identifiable {
-    case localOnly
-    case cloudAssisted
+    case local
+    case hybrid
+    case cloud
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .localOnly: "本地执行"
-        case .cloudAssisted: "云端 AI"
+        case .local: "本地"
+        case .hybrid: "混合"
+        case .cloud: "云端"
         }
     }
 
     var compactDescription: String {
         switch self {
-        case .localOnly: "不调用云端模型；可使用经授权的本地与网络工具"
-        case .cloudAssisted: "可组合本地工具，并通过统一模型接口生成内容"
+        case .local: "仅使用本机工具、AppleScript 或本地模型"
+        case .hybrid: "组合本机能力与用户选择的云端模型"
+        case .cloud: "只处理用户直接提交给云端模型的内容"
         }
+    }
+
+    var allowsCloudModel: Bool {
+        self != .local
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        switch value {
+        case "local", "localOnly": self = .local
+        case "hybrid", "cloudAssisted": self = .hybrid
+        case "cloud": self = .cloud
+        default:
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "未知的技能执行类型：\(value)"
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -192,6 +220,32 @@ struct SkillModelTask: Codable, Equatable {
     var providerPolicy: String
 }
 
+struct SkillAppleScriptDefinition: Codable, Equatable {
+    var source: String
+    var argumentVariables: [String]
+    var targetApplications: [String]
+    var riskNotes: [String]
+    var acknowledgedSourceHash: String?
+
+    var sourceHash: String {
+        let digest = SHA256.hash(data: Data(source.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    var hasValidRiskAcknowledgement: Bool {
+        !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && acknowledgedSourceHash == sourceHash
+    }
+
+    mutating func acknowledgeCurrentSource() {
+        acknowledgedSourceHash = sourceHash
+    }
+
+    mutating func invalidateAcknowledgement() {
+        acknowledgedSourceHash = nil
+    }
+}
+
 struct SkillCreationRequest {
     var executionMode: SkillExecutionMode
     var mode: SkillCreationMode
@@ -259,12 +313,13 @@ struct SkillDraft: Codable, Equatable {
     var executionMode: SkillExecutionMode?
     var workflow: [SkillWorkflowStep]?
     var modelTask: SkillModelTask?
+    var appleScript: SkillAppleScriptDefinition?
     var networkHosts: [String]?
     var dataDisclosure: [String]?
     var parameters: [SkillParameterDefinition]?
 
     var resolvedExecutionMode: SkillExecutionMode {
-        executionMode ?? .cloudAssisted
+        executionMode ?? .hybrid
     }
 
     var resolvedParameters: [SkillParameterDefinition] {
@@ -290,7 +345,7 @@ struct SkillDraft: Codable, Equatable {
             permissions: [],
             executionMode: request.executionMode,
             workflow: [],
-            modelTask: request.executionMode == .cloudAssisted
+            modelTask: request.executionMode.allowsCloudModel
                 ? SkillModelTask(
                     tool: "model.generateText",
                     promptTemplate: request.naturalLanguageDescription + "\n\n用户本次输入：{{userInput}}",
@@ -298,6 +353,7 @@ struct SkillDraft: Codable, Equatable {
                     providerPolicy: "userDefault"
                 )
                 : nil,
+            appleScript: nil,
             networkHosts: [],
             dataDisclosure: [],
             parameters: request.parameters
@@ -306,6 +362,7 @@ struct SkillDraft: Codable, Equatable {
 }
 
 struct UserSkill: Codable, Identifiable {
+    var schemaVersion: Int?
     var id: UUID
     var name: String
     var aliases: [String]
@@ -323,7 +380,9 @@ struct UserSkill: Codable, Identifiable {
     var permissions: [String]
     var executionMode: SkillExecutionMode?
     var workflow: [SkillWorkflowStep]?
+    var workflowV3: SkillWorkflowDefinitionV3?
     var modelTask: SkillModelTask?
+    var appleScript: SkillAppleScriptDefinition?
     var networkHosts: [String]?
     var dataDisclosure: [String]?
     var parameters: [SkillParameterDefinition]?
@@ -335,6 +394,7 @@ struct UserSkill: Codable, Identifiable {
     var builtInIdentifier: String?
 
     init(draft: SkillDraft, request: SkillCreationRequest, generatedBy: String) {
+        schemaVersion = SkillWorkflowDefinitionV3.currentVersion
         id = UUID()
         name = draft.name
         let registeredKeyword = request.keyword.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -353,7 +413,13 @@ struct UserSkill: Codable, Identifiable {
         permissions = draft.permissions
         executionMode = draft.executionMode ?? request.executionMode
         workflow = draft.workflow
+        workflowV3 = SkillWorkflowDefinitionV3.migrate(
+            from: draft.workflow ?? [],
+            parameters: draft.parameters ?? request.parameters,
+            modelTask: draft.modelTask
+        )
         modelTask = draft.modelTask
+        appleScript = draft.appleScript
         networkHosts = draft.networkHosts
         dataDisclosure = draft.dataDisclosure
         parameters = draft.parameters ?? request.parameters
@@ -382,6 +448,7 @@ struct UserSkill: Codable, Identifiable {
         modelTask: SkillModelTask? = nil,
         dataDisclosure: [String] = []
     ) {
+        schemaVersion = SkillWorkflowDefinitionV3.currentVersion
         self.id = id
         self.name = name
         self.aliases = Array(Set(aliases))
@@ -399,7 +466,13 @@ struct UserSkill: Codable, Identifiable {
         self.permissions = permissions
         self.executionMode = executionMode
         self.workflow = workflow
+        workflowV3 = SkillWorkflowDefinitionV3.migrate(
+            from: workflow,
+            parameters: parameters,
+            modelTask: modelTask
+        )
         self.modelTask = modelTask
+        appleScript = nil
         networkHosts = []
         self.dataDisclosure = dataDisclosure
         self.parameters = parameters
@@ -416,7 +489,39 @@ struct UserSkill: Codable, Identifiable {
     }
 
     var resolvedExecutionMode: SkillExecutionMode {
-        executionMode ?? .cloudAssisted
+        executionMode ?? .hybrid
+    }
+
+    var resolvedSchemaVersion: Int {
+        schemaVersion ?? 1
+    }
+
+    var resolvedWorkflowV3: SkillWorkflowDefinitionV3 {
+        workflowV3 ?? SkillWorkflowDefinitionV3.migrate(
+            from: workflow ?? [],
+            parameters: resolvedParameters,
+            modelTask: modelTask
+        )
+    }
+
+    var resolvedWorkflowToolIdentifiers: [String] {
+        if let workflowV3, !workflowV3.steps.isEmpty {
+            return workflowV3.steps.map(\.toolID)
+        }
+        return workflow?.map(\.tool) ?? []
+    }
+
+    var containsAppleScript: Bool {
+        guard let appleScript else { return false }
+        return !appleScript.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var hasValidAppleScriptRiskAcknowledgement: Bool {
+        !containsAppleScript || appleScript?.hasValidRiskAcknowledgement == true
+    }
+
+    mutating func acknowledgeAppleScriptRisk() {
+        appleScript?.acknowledgeCurrentSource()
     }
 
     var resolvedParameters: [SkillParameterDefinition] {

@@ -218,6 +218,7 @@ struct AssistantPanelView: View {
                         .frame(width: 22, height: 22)
                 }
                 .menuStyle(.borderlessButton)
+                .tint(.primary)
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("添加\(fileParameter.type.displayName)")
@@ -553,12 +554,16 @@ struct AssistantPanelView: View {
     }
 
     private func executionScope(for skill: UserSkill) -> PanelExecutionScope {
-        var toolIdentifiers = (skill.workflow ?? []).map(\.tool) + skill.requiredTools
+        var toolIdentifiers = skill.resolvedWorkflowToolIdentifiers + skill.requiredTools
         if let modelTool = skill.modelTask?.tool {
             toolIdentifiers.append(modelTool)
         }
         if toolIdentifiers.isEmpty {
-            return skill.resolvedExecutionMode == .cloudAssisted ? .cloud : .local
+            switch skill.resolvedExecutionMode {
+            case .local: return .local
+            case .hybrid: return .hybrid
+            case .cloud: return .cloud
+            }
         }
         return executionScope(forToolIdentifiers: toolIdentifiers)
     }
@@ -1355,8 +1360,8 @@ struct AssistantPanelView: View {
         activeInvocationOptions = options
         copied = false
         let plannedScope = executionScope(for: skill)
-        let firstTool = skill.workflow?.first.map {
-            ToolRegistry.shared.canonicalIdentifier(for: $0.tool)
+        let firstTool = skill.resolvedWorkflowToolIdentifiers.first.map {
+            ToolRegistry.shared.canonicalIdentifier(for: $0)
         } ?? (plannedScope == .local ? "local.match" : "model.generateText")
         executionActivity = .preparing(scope: plannedScope, toolIdentifier: firstTool)
         AppConsole.shared.info(
@@ -1378,8 +1383,8 @@ struct AssistantPanelView: View {
             isThinking = true
         }
 
-        let workflowTools = Set((skill.workflow ?? []).map {
-            ToolRegistry.shared.canonicalIdentifier(for: $0.tool)
+        let workflowTools = Set(skill.resolvedWorkflowToolIdentifiers.map {
+            ToolRegistry.shared.canonicalIdentifier(for: $0)
         })
         let requiresModel = workflowTools.contains("model.generateText")
             || skill.requiredTools.contains { ToolRegistry.shared.canonicalIdentifier(for: $0) == "model.generateText" }

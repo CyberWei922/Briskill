@@ -36,7 +36,7 @@ final class SkillGenerationService {
                 """,
                 system: Self.systemPrompt(for: request.executionMode),
                 provider: provider,
-                maxTokens: 1_400,
+                maxTokens: nil,
                 expectsJSON: true
             )
 
@@ -61,7 +61,7 @@ final class SkillGenerationService {
                 prompt: request.generationPrompt,
                 system: Self.systemPrompt(for: request.executionMode),
                 provider: provider,
-                maxTokens: 1_400,
+                maxTokens: nil,
                 expectsJSON: true
             )
         } catch let error as AIServiceError {
@@ -75,7 +75,7 @@ final class SkillGenerationService {
                 """,
                 system: Self.systemPrompt(for: request.executionMode),
                 provider: provider,
-                maxTokens: 1_800,
+                maxTokens: nil,
                 expectsJSON: true
             )
         }
@@ -102,6 +102,13 @@ final class SkillGenerationService {
         }
         do {
             var draft = try JSONDecoder().decode(SkillDraft.self, from: data)
+            if var appleScript = draft.appleScript {
+                appleScript.acknowledgedSourceHash = nil
+                let report = AppleScriptRiskAnalyzer.analyze(appleScript.source)
+                appleScript.targetApplications = report.targetApplications
+                appleScript.riskNotes = report.notes
+                draft.appleScript = appleScript
+            }
             if let expectedExecutionMode {
                 draft.executionMode = expectedExecutionMode
                 try validate(draft, expectedExecutionMode: expectedExecutionMode)
@@ -151,22 +158,74 @@ final class SkillGenerationService {
         _ draft: SkillDraft,
         expectedExecutionMode: SkillExecutionMode
     ) throws {
-        let workflowTools = draft.workflow?.map { $0.tool.lowercased() } ?? []
-        let requiredTools = draft.requiredTools.map { $0.lowercased() }
+        let workflowTools = draft.workflow?.map { canonicalToolID($0.tool) } ?? []
+        let requiredTools = draft.requiredTools.map(canonicalToolID)
+        let workflowToolSet = Set(workflowTools)
+        let requiredToolSet = Set(requiredTools)
+        guard workflowToolSet == requiredToolSet else {
+            throw SkillGenerationError.modeViolation("requiredTools 必须与 workflow 实际调用的工具完全一致")
+        }
+        let allTools = workflowToolSet
+        let hasModel = allTools.contains("model.generateText")
+        let hasLocalTool = allTools.contains { identifier in
+            ToolDescriptorCatalog.byIdentifier[identifier]?.executionLocation == .local
+        }
+        let hasAppleScriptStep = allTools.contains("automation.appleScript")
+        let unavailableTools = allTools.filter { identifier in
+            ToolDescriptorCatalog.byIdentifier[identifier] == nil
+        }
+        guard unavailableTools.isEmpty else {
+            throw SkillGenerationError.modeViolation(
+                "引用了尚未注册的工具：\(unavailableTools.sorted().joined(separator: "、"))"
+            )
+        }
 
         switch expectedExecutionMode {
-        case .localOnly:
+        case .local:
             guard draft.modelTask == nil,
-                  !workflowTools.contains(where: { $0.hasPrefix("model.") }),
-                  !requiredTools.contains(where: { $0.hasPrefix("model.") }) else {
+                  !hasModel else {
                 throw SkillGenerationError.modeViolation("本地技能不能包含云端模型调用")
             }
-        case .cloudAssisted:
+        case .hybrid:
             guard let modelTask = draft.modelTask,
                   modelTask.tool == "model.generateText",
-                  !modelTask.promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw SkillGenerationError.modeViolation("云端 AI 技能必须提供 model.generateText 提示词模板")
+                  !modelTask.promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  hasModel,
+                  hasLocalTool else {
+                throw SkillGenerationError.modeViolation("混合技能必须同时包含本地步骤和 model.generateText")
             }
+        case .cloud:
+            guard let modelTask = draft.modelTask,
+                  modelTask.tool == "model.generateText",
+                  !modelTask.promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  hasModel,
+                  !hasLocalTool else {
+                throw SkillGenerationError.modeViolation("云端技能只能包含 model.generateText，不能调用本地工具")
+            }
+        }
+
+        if hasAppleScriptStep {
+            guard let appleScript = draft.appleScript,
+                  !appleScript.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SkillGenerationError.modeViolation("工作流调用了 automation.appleScript，但没有提供 AppleScript 源代码")
+            }
+        } else if draft.appleScript != nil {
+            throw SkillGenerationError.modeViolation("提供了 AppleScript 源代码，但工作流没有 automation.appleScript 步骤")
+        }
+    }
+
+    private func canonicalToolID(_ rawIdentifier: String) -> String {
+        let normalized = rawIdentifier
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: ".")
+        switch normalized {
+        case "model", "model.generatetext", "text.generation":
+            return "model.generateText"
+        case "applescript", "automation.applescript", "script.applescript":
+            return "automation.appleScript"
+        default:
+            return ToolDescriptorCatalog.all.first { $0.id.lowercased() == normalized }?.id ?? rawIdentifier
         }
     }
 
@@ -190,7 +249,7 @@ final class SkillGenerationService {
       "explanation": "用自然语言解释完整流程和限制",
       "requiredTools": ["按实际调用顺序去重后的工具 ID"],
       "permissions": ["实际需要的 macOS 权限或 cloud_api"],
-      "executionMode": "localOnly 或 cloudAssisted",
+      "executionMode": "local、hybrid 或 cloud",
       "parameters": [
         {
           "id": "稳定且唯一的参数 ID",
@@ -209,14 +268,15 @@ final class SkillGenerationService {
         }
       ],
       "modelTask": null,
+      "appleScript": null,
       "networkHosts": ["需要访问的主机名；不需要则为空数组"],
       "dataDisclosure": ["会离开本机的数据流说明；没有则为空数组"]
     }
 
     通用规则：
-    - workflow 只能引用下面对应模式列出的工具，不得编造已经可用的系统能力。
+    - workflow 只能引用当前模式工具注册表中的工具，不得编造已经可用的系统能力。
     - 如果用户需要但注册表没有工具，在 requiredTools 写 missing:能力，并在 explanation 清楚说明。
-    - 不要声称已经执行任务，不生成或执行 Shell、AppleScript、Swift、Python、JavaScript 等任意代码。
+    - 不要声称已经执行任务。只有确实需要控制其他 macOS 应用时才生成 AppleScript；禁止生成 Swift、Python、JavaScript 等其他任意代码。
     - workflow.arguments 必须始终是 JSON 对象。对象中的值可以是字符串、数字、布尔值、数组、嵌套对象或 null，但必须符合对应工具的真实参数结构。
     - arguments 中的运行时值使用 {{参数名称}}、{{userInput}} 或 $变量引用，不把用户示例数据写死。
     - model.generateText 步骤的 arguments 只传运行时输入，例如 {"input":"{{英文单词}}"}。严禁在 arguments 中放入 promptTemplate、inputVariables 或 providerPolicy；这三个字段只属于顶层 modelTask。
@@ -226,45 +286,37 @@ final class SkillGenerationService {
     - 文件操作只能使用用户授权路径；修改、删除、发送等操作必须在 permissions 中声明确认要求。
     - 网络访问不等于云端大模型调用。经过授权的本地网络工具可以联网，但必须声明具体目标和用途。
     - actions 是给用户阅读的自然语言步骤；workflow 是给执行器读取的结构化步骤，两者必须一致。
+    - 需要 AppleScript 时，workflow 使用 automation.appleScript，并提供顶层 appleScript：
+      {"source":"完整可编译源码","argumentVariables":["参数或前序变量名"],"targetApplications":["目标应用"],"riskNotes":["风险说明"],"acknowledgedSourceHash":null}
+    - AppleScript 必须使用 on run argv 接收参数，不能把用户运行时内容硬编码或拼接成源代码。acknowledgedSourceHash 必须为 null，风险确认只能由用户在本机完成。
+    - AppleScript 可以包含 do shell script，但必须在 riskNotes 明确说明命令、数据范围和风险，不能隐藏或模糊描述。
     """
 
     private static func modePrompt(for executionMode: SkillExecutionMode) -> String {
+        let catalog = ToolDescriptorCatalog.promptCatalog(for: executionMode)
         switch executionMode {
-        case .localOnly:
+        case .local:
             return """
-            当前模式：localOnly（本地执行）。
+            当前模式：local（本地）。所有数据必须留在本机。
 
             允许的工具注册表：
-            - clipboard.readText，arguments={}：读取剪贴板纯文本。
-            - clipboard.writeText，arguments={"text":"$前一步输出"}：写入剪贴板纯文本。
-            - selection.readText，arguments={}：读取用户在其他应用中选中的文字；需要 accessibility。
-            - selection.replaceText，arguments={"text":"$前一步输出"}：经用户原生确认后替换选中文字；需要 accessibility 和 confirmation_required。
-            - screen.captureRegion，arguments={}：让用户框选屏幕区域并返回图片路径；需要 screen_recording。
-            - image.ocr，arguments={"path":"{{图片}}"}：使用本机 Apple Vision 识别图片文字。
-            - file.readText，arguments={"path":"{{文件}}"}：读取文本、代码、RTF 或含文字层的 PDF。
-            - file.list，arguments={"directory":"{{文件夹}}","limit":50}：列出用户选择目录中的项目。
-            - file.search，arguments={"query":"{{文件名}}","directory":"可选用户目录","limit":30}：按名称有界搜索文件。
-            - file.rename，arguments={"path":"{{文件}}","newName":"{{新名称}}"}：经用户原生确认后重命名，不覆盖现有文件。
-            - file.createEmpty，arguments={"name":"{{名称.后缀}}"}：在用户下载目录创建空文件；文件名必须带后缀且不能包含路径。
-            - file.trash，arguments={"path":"{{文件}}"}：经用户原生确认后移到 macOS 废纸篓。
-            - system.snapshot，arguments={}：读取诊断所需的系统、磁盘、温度和高占用进程快照。
+            \(catalog)
 
             强制要求：
-            - executionMode 必须为 localOnly。
+            - executionMode 必须为 local。
             - modelTask 必须为 null。
             - workflow 和 requiredTools 禁止出现任何 model.* 或 cloud_api。
-            - 当前尚未注册通用 network.request、通知或任意脚本工具；需要这些能力时必须用 missing:能力 标记，不能伪造可执行工作流。
             - dataDisclosure 通常为空。
             """
-        case .cloudAssisted:
+        case .hybrid:
             return """
-            当前模式：cloudAssisted（云端 AI 协同）。
+            当前模式：hybrid（混合）。工作流必须同时包含本地能力和云端模型。
 
-            除 localOnly 模式中已经注册的本地工具外，额外允许：
-            - model.generateText：调用用户配置的统一云端文本模型接口。
+            允许的工具注册表：
+            \(catalog)
 
             强制要求：
-            - executionMode 必须为 cloudAssisted。
+            - executionMode 必须为 hybrid。
             - modelTask 必须存在并严格使用以下结构：
               {"tool":"model.generateText","promptTemplate":"运行时提示词模板，变量使用 {{变量名}}","inputVariables":["变量名"],"providerPolicy":"userDefault"}
             - modelTask.promptTemplate 是以后每次运行技能时使用的提示词，不是本次创建时的回答。
@@ -274,6 +326,20 @@ final class SkillGenerationService {
             - requiredTools 必须包含 model.generateText，permissions 必须包含 cloud_api。
             - dataDisclosure 必须逐项说明哪些变量会发送给云端模型；不得用“必要数据”等模糊描述。
             - 不绑定 DeepSeek、GLM、Gemini 或 OpenAI，运行时使用用户默认服务商。
+            """
+        case .cloud:
+            return """
+            当前模式：cloud（云端）。只允许用户直接输入经过 model.generateText 处理，不得读取剪贴板、文件、选区、屏幕、系统信息或调用 AppleScript。
+
+            允许的工具注册表：
+            \(catalog)
+
+            强制要求：
+            - executionMode 必须为 cloud。
+            - workflow 只能包含 model.generateText。
+            - modelTask 必须存在并使用用户运行时参数或 {{userInput}}。
+            - requiredTools 必须仅包含 model.generateText，permissions 必须包含 cloud_api。
+            - dataDisclosure 必须说明用户输入会发送给用户选择的云端服务商。
             """
         }
     }

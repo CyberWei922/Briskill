@@ -11,6 +11,93 @@ extension Color {
     }
 }
 
+/// Bridges the settings SwiftUI hierarchy to the existing AppKit window without
+/// replacing any window-controller behavior. It only intercepts an actual close
+/// request while a skill draft is dirty, then forwards lifecycle callbacks to
+/// the controller that originally owned the window delegate.
+private struct SettingsWindowCloseGuard: NSViewRepresentable {
+    let hasUnsavedChanges: Bool
+    let discardChanges: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> WindowObservingView {
+        let view = WindowObservingView()
+        view.windowDidChange = { [weak coordinator = context.coordinator] window in
+            coordinator?.attach(to: window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowObservingView, context: Context) {
+        context.coordinator.hasUnsavedChanges = hasUnsavedChanges
+        context.coordinator.discardChanges = discardChanges
+        context.coordinator.attach(to: nsView.window)
+    }
+
+    static func dismantleNSView(
+        _ nsView: WindowObservingView,
+        coordinator: Coordinator
+    ) {
+        nsView.windowDidChange = nil
+        coordinator.detach()
+    }
+
+    final class WindowObservingView: NSView {
+        var windowDidChange: ((NSWindow?) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            windowDidChange?(window)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSWindowDelegate {
+        weak var guardedWindow: NSWindow?
+        weak var previousDelegate: (any NSWindowDelegate)?
+        var hasUnsavedChanges = false
+        var discardChanges: () -> Void = {}
+
+        func attach(to window: NSWindow?) {
+            guard let window else { return }
+            guard guardedWindow !== window || window.delegate !== self else { return }
+            detach()
+            guardedWindow = window
+            previousDelegate = window.delegate
+            window.delegate = self
+        }
+
+        func detach() {
+            if let guardedWindow, guardedWindow.delegate === self {
+                guardedWindow.delegate = previousDelegate
+            }
+            guardedWindow = nil
+            previousDelegate = nil
+        }
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            if hasUnsavedChanges {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "放弃未保存的技能修改？"
+                alert.informativeText = "关闭设置窗口后，当前技能尚未保存的内容会丢失。"
+                alert.addButton(withTitle: "继续编辑")
+                alert.addButton(withTitle: "放弃并关闭")
+                guard alert.runModal() == .alertSecondButtonReturn else { return false }
+                discardChanges()
+            }
+            return previousDelegate?.windowShouldClose?(sender) ?? true
+        }
+
+        func windowWillClose(_ notification: Notification) {
+            previousDelegate?.windowWillClose?(notification)
+        }
+    }
+}
+
 struct SettingsView: View {
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     @AppStorage("automaticInputSourceSwitching") private var automaticInputSourceSwitching = true
@@ -24,6 +111,9 @@ struct SettingsView: View {
     @State private var navigationIndex = 0
     @State private var isApplyingHistory = false
     @State private var isDetailScrolled = false
+    @State private var skillEditorHasUnsavedChanges = false
+    @State private var pendingSectionSelection: SettingsSection?
+    @State private var showsDiscardedSkillChangesConfirmation = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -39,7 +129,7 @@ struct SettingsView: View {
                                 isSelected: selection == section,
                                 accentColor: accentColor
                             ) {
-                                selection = section
+                                requestSelection(section)
                             }
                         }
                     }
@@ -59,6 +149,13 @@ struct SettingsView: View {
         .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 680, minHeight: 520)
         .tint(accentColor)
+        .background {
+            SettingsWindowCloseGuard(
+                hasUnsavedChanges: skillEditorHasUnsavedChanges,
+                discardChanges: discardSkillChangesForWindowClose
+            )
+            .frame(width: 0, height: 0)
+        }
         .onAppear {
             AppAppearance.apply(preferredAppearance)
             launchAtLogin.refresh()
@@ -71,6 +168,22 @@ struct SettingsView: View {
         }
         .onChange(of: selection) {
             recordSelectionInHistory()
+        }
+        .alert(
+            "放弃未保存的技能修改？",
+            isPresented: $showsDiscardedSkillChangesConfirmation
+        ) {
+            Button("继续编辑", role: .cancel) {
+                pendingSectionSelection = nil
+            }
+            Button("放弃修改", role: .destructive) {
+                guard let pendingSectionSelection else { return }
+                skillEditorHasUnsavedChanges = false
+                selection = pendingSectionSelection
+                self.pendingSectionSelection = nil
+            }
+        } message: {
+            Text("切换设置页面后，当前技能尚未保存的内容会丢失。")
         }
     }
 
@@ -89,7 +202,8 @@ struct SettingsView: View {
                 canGoBack: navigationIndex > 0,
                 canGoForward: navigationIndex + 1 < navigationHistory.count,
                 goBack: { moveInHistory(by: -1) },
-                goForward: { moveInHistory(by: 1) }
+                goForward: { moveInHistory(by: 1) },
+                onEditingDirtyChange: { skillEditorHasUnsavedChanges = $0 }
             )
         } else {
             VStack(spacing: 0) {
@@ -123,6 +237,23 @@ struct SettingsView: View {
         }
         navigationHistory.append(selection)
         navigationIndex = navigationHistory.count - 1
+    }
+
+    private func requestSelection(_ section: SettingsSection) {
+        guard section != currentSection else { return }
+        if currentSection == .skills, skillEditorHasUnsavedChanges {
+            pendingSectionSelection = section
+            showsDiscardedSkillChangesConfirmation = true
+        } else {
+            selection = section
+        }
+    }
+
+    private func discardSkillChangesForWindowClose() {
+        skillEditorHasUnsavedChanges = false
+        pendingSectionSelection = nil
+        showsDiscardedSkillChangesConfirmation = false
+        selection = .general
     }
 
     private func moveInHistory(by offset: Int) {
@@ -820,6 +951,7 @@ private struct SkillManagementView: View {
     let canGoForward: Bool
     let goBack: () -> Void
     let goForward: () -> Void
+    let onEditingDirtyChange: (Bool) -> Void
     @ObservedObject private var skillStore = SkillStore.shared
     @State private var editingSkillID: UUID?
     @State private var searchText = ""
@@ -840,9 +972,11 @@ private struct SkillManagementView: View {
                     onBack: closeEditorForBack,
                     canGoForward: canGoForward,
                     goForward: goForward,
+                    onEnabledChange: { setEnabled($0, for: skill.id) },
                     onSave: save,
                     onExport: export,
-                    onDelete: { skillPendingDeletion = $0 }
+                    onDelete: { skillPendingDeletion = $0 },
+                    onDirtyChange: onEditingDirtyChange
                 )
                 .id(skill.id)
             } else {
@@ -933,7 +1067,7 @@ private struct SkillManagementView: View {
 
                             if index + 1 < filteredSkills.count {
                                 Divider()
-                                    .padding(.leading, 52)
+                                    .padding(.horizontal, 14)
                             }
                         }
                     }
@@ -1042,18 +1176,31 @@ private struct SkillManagementView: View {
         }
     }
 
-    private func save(_ editedSkill: UserSkill) {
+    @discardableResult
+    private func setEnabled(_ isEnabled: Bool, for skillID: UUID) -> Bool {
+        do {
+            try skillStore.setEnabled(isEnabled, for: skillID)
+            message = nil
+            return true
+        } catch {
+            message = SkillManagementMessage(text: "无法更新启用状态：\(error.localizedDescription)", isError: true)
+            return false
+        }
+    }
+
+    @discardableResult
+    private func save(_ editedSkill: UserSkill) -> Bool {
         var skill = editedSkill
         skill.name = skill.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !skill.name.isEmpty else {
             message = SkillManagementMessage(text: "技能名称不能为空", isError: true)
-            return
+            return false
         }
         skill.registeredKeyword = skill.registeredKeyword?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard skill.registeredKeyword?.isEmpty == false else {
             message = SkillManagementMessage(text: "唯一索引不能为空", isError: true)
-            return
+            return false
         }
         if let keyword = skill.registeredKeyword {
             skill.aliases.removeAll { $0.compare(keyword, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
@@ -1066,19 +1213,19 @@ private struct SkillManagementView: View {
         }
         guard parameterNames.allSatisfy({ !$0.isEmpty }) else {
             message = SkillManagementMessage(text: "参数名称不能为空", isError: true)
-            return
+            return false
         }
         guard Set(parameterNames).count == parameterNames.count else {
             message = SkillManagementMessage(text: "参数名称不能重复", isError: true)
-            return
+            return false
         }
-        if skill.resolvedExecutionMode == .cloudAssisted {
+        if skill.resolvedExecutionMode.allowsCloudModel {
             guard let prompt = skill.modelTask?.promptTemplate,
                   !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 message = SkillManagementMessage(text: "云端 AI 技能必须填写运行时提示词", isError: true)
-                return
+                return false
             }
-            var inputVariables = parameterNames
+            var inputVariables = skill.resolvedParameters.map(\.id)
             if prompt.contains("{{userInput}}") {
                 inputVariables.append("userInput")
             }
@@ -1095,13 +1242,17 @@ private struct SkillManagementView: View {
         do {
             try skillStore.save(skill)
             message = SkillManagementMessage(text: "已保存", isError: false)
+            return true
         } catch {
             message = SkillManagementMessage(text: error.localizedDescription, isError: true)
+            return false
         }
     }
 
     private func migratingParameterReferences(from original: UserSkill, to edited: UserSkill) -> UserSkill {
-        let originalNames = Dictionary(uniqueKeysWithValues: original.resolvedParameters.map { ($0.id, $0.name) })
+        let originalNames = original.resolvedParameters.reduce(into: [String: String]()) { result, parameter in
+            if result[parameter.id] == nil { result[parameter.id] = parameter.name }
+        }
         let replacements = edited.resolvedParameters.reduce(into: [String: String]()) { result, parameter in
             guard let oldName = originalNames[parameter.id], oldName != parameter.name else { return }
             result[oldName] = parameter.name
@@ -1121,6 +1272,18 @@ private struct SkillManagementView: View {
                 $0.replacingParameterReferences(replacements)
             }
             return migratedStep
+        }
+        if var workflowV3 = migrated.workflowV3 {
+            for index in workflowV3.steps.indices {
+                if let prompt = workflowV3.steps[index].promptTemplate {
+                    workflowV3.steps[index].promptTemplate = prompt
+                        .replacingSkillParameterPlaceholders(replacements)
+                }
+                workflowV3.steps[index].arguments = workflowV3.steps[index].arguments.mapValues {
+                    $0.replacingSkillParameterPlaceholders(replacements)
+                }
+            }
+            migrated.workflowV3 = workflowV3
         }
         return migrated
     }
@@ -1234,30 +1397,23 @@ private struct SkillManagementRow: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            Image(systemName: skill.resolvedExecutionMode == .localOnly ? "desktopcomputer" : "cloud")
-                .foregroundStyle(skill.isEnabled ? Color.indigo : Color.secondary)
+            Image(systemName: executionSymbol)
+                .foregroundStyle(skill.isEnabled ? Color.accentColor : Color.secondary)
                 .frame(width: 26, height: 26)
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(skill.name)
-                        .lineLimit(1)
-                        .font(.system(size: 12, weight: .semibold))
-                    if skill.isBuiltIn {
-                        Text("内置技能")
-                            .font(.system(size: 8.5, weight: .medium))
-                            .foregroundStyle(.indigo)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Color.indigo.opacity(0.10), in: Capsule())
-                    }
-                }
-                Text(skill.executionExample)
-                    .lineLimit(1)
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
+            Text(skill.name)
+                .lineLimit(1)
+                .font(.system(size: 12, weight: .semibold))
+
+            Spacer(minLength: 14)
+
+            Text(skill.executionExample)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 260, alignment: .trailing)
+
             if isSelecting {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 15, weight: .medium))
@@ -1273,324 +1429,40 @@ private struct SkillManagementRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
-}
 
-private struct SkillEditorView: View {
-    @State private var skill: UserSkill
-    @State private var isFormScrolled = false
-    let message: SkillManagementMessage?
-    let onBack: () -> Void
-    let canGoForward: Bool
-    let goForward: () -> Void
-    let onSave: (UserSkill) -> Void
-    let onExport: (UserSkill) -> Void
-    let onDelete: (UserSkill) -> Void
-
-    init(
-        skill: UserSkill,
-        message: SkillManagementMessage?,
-        onBack: @escaping () -> Void,
-        canGoForward: Bool,
-        goForward: @escaping () -> Void,
-        onSave: @escaping (UserSkill) -> Void,
-        onExport: @escaping (UserSkill) -> Void,
-        onDelete: @escaping (UserSkill) -> Void
-    ) {
-        _skill = State(initialValue: skill)
-        self.message = message
-        self.onBack = onBack
-        self.canGoForward = canGoForward
-        self.goForward = goForward
-        self.onSave = onSave
-        self.onExport = onExport
-        self.onDelete = onDelete
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 14) {
-                SettingsHistoryControl(
-                    canGoBack: true,
-                    canGoForward: canGoForward,
-                    goBack: onBack,
-                    goForward: goForward
-                )
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 7) {
-                        TextField("技能名称", text: $skill.name)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 13.5, weight: .semibold))
-                            .lineLimit(1)
-                        if skill.isBuiltIn {
-                            Text("内置技能")
-                                .font(.system(size: 8.5, weight: .medium))
-                                .foregroundStyle(.indigo)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.indigo.opacity(0.10), in: Capsule())
-                        }
-                    }
-                    Text("更新于 \(skill.updatedAt.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.system(size: 8.5))
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer()
-                Toggle("启用", isOn: $skill.isEnabled)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-            }
-            .padding(.horizontal, 11)
-            .frame(height: 58)
-            .background(Color.settingsPaneBackground)
-            .overlay(alignment: .bottom) {
-                if isFormScrolled {
-                    Divider()
-                        .transition(.opacity)
-                }
-            }
-            .animation(.easeOut(duration: 0.12), value: isFormScrolled)
-
-            Form {
-                Section("调用") {
-                    LabeledContent("调用方式") {
-                        Text(skill.executionExample)
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .foregroundStyle(.primary)
-                            .textSelection(.enabled)
-                    }
-                    TextField("唯一索引", text: registeredKeywordBinding)
-                        .textFieldStyle(.plain)
-                    TextField("搜索别名，用逗号分隔", text: aliasesBinding)
-                        .textFieldStyle(.plain)
-                    Picker("执行模式", selection: executionModeBinding) {
-                        ForEach(SkillExecutionMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    TextField("触发说明", text: $skill.trigger)
-                        .textFieldStyle(.plain)
-                }
-
-                Section("说明") {
-                    TextField("技能摘要", text: $skill.summary, axis: .vertical)
-                        .lineLimit(2...4)
-                        .textFieldStyle(.plain)
-                    TextField("输出形式和内容", text: $skill.output, axis: .vertical)
-                        .lineLimit(2...4)
-                        .textFieldStyle(.plain)
-                }
-
-                Section("执行步骤") {
-                    TextEditor(text: actionsBinding)
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .frame(minHeight: 82)
-                        .scrollContentBackground(.hidden)
-                        .background(Color.clear)
-                    Text("每行代表一个步骤。底层工作流仍保留在技能文件中。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("传入参数") {
-                    if parametersBinding.wrappedValue.isEmpty {
-                        Text("这个技能不需要运行时参数")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(parametersBinding) { $parameter in
-                            SkillParameterEditorRow(parameter: $parameter) {
-                                skill.parameters?.removeAll { $0.id == parameter.id }
-                            }
-                        }
-                    }
-                    Button {
-                        var values = parametersBinding.wrappedValue
-                        values.append(.blank(index: values.count + 1))
-                        parametersBinding.wrappedValue = values
-                    } label: {
-                        Label("添加参数", systemImage: "plus")
-                    }
-                }
-
-                if skill.resolvedExecutionMode == .cloudAssisted {
-                    Section("运行时 AI 提示词") {
-                        TextEditor(text: modelPromptBinding)
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .frame(minHeight: 100)
-                            .scrollContentBackground(.hidden)
-                            .background(Color.clear)
-                        Text("参数使用 {{参数名称}} 引用。修改后请确认变量与上方参数一致。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("能力与权限") {
-                    LabeledContent("工具", value: skill.requiredTools.isEmpty ? "无" : skill.requiredTools.joined(separator: "、"))
-                    LabeledContent("权限", value: skill.permissions.isEmpty ? "无" : skill.permissions.joined(separator: "、"))
-                    if !skill.resolvedParameters.isEmpty {
-                        Text("导出文件会包含技能定义和提示词，但不会包含 API Key、生成历史或运行时传入的文件。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
-            .background(Color.settingsPaneBackground)
-            .trackSettingsScroll($isFormScrolled)
-
-            Divider()
-
-            HStack {
-                Button("删除", role: .destructive) { onDelete(skill) }
-                Button("导出…") { onExport(skill) }
-                Spacer()
-                if let message {
-                    Label(message.text, systemImage: message.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(message.isError ? Color.red : Color.green)
-                        .lineLimit(1)
-                }
-                Button("保存修改") {
-                    skill.updatedAt = Date()
-                    onSave(skill)
-                }
-                    .buttonStyle(.borderedProminent)
-            }
-            .padding(.horizontal, 20)
-            .frame(height: 48)
-            .background(Color.settingsPaneBackground)
+    private var executionSymbol: String {
+        switch skill.resolvedExecutionMode {
+        case .local: "desktopcomputer"
+        case .hybrid: "arrow.triangle.2.circlepath"
+        case .cloud: "cloud"
         }
-        .background(Color.settingsPaneBackground)
-    }
-
-    private var aliasesBinding: Binding<String> {
-        Binding(
-            get: {
-                skill.aliases
-                    .filter { alias in
-                        guard let keyword = skill.registeredKeyword else { return true }
-                        return alias.compare(keyword, options: [.caseInsensitive, .diacriticInsensitive]) != .orderedSame
-                    }
-                    .joined(separator: ", ")
-            },
-            set: { value in
-                skill.aliases = value
-                    .components(separatedBy: CharacterSet(charactersIn: ",，\n"))
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-            }
-        )
-    }
-
-    private var registeredKeywordBinding: Binding<String> {
-        Binding(
-            get: { skill.registeredKeyword ?? "" },
-            set: { skill.registeredKeyword = $0 }
-        )
-    }
-
-    private var executionModeBinding: Binding<SkillExecutionMode> {
-        Binding(
-            get: { skill.resolvedExecutionMode },
-            set: { mode in
-                skill.executionMode = mode
-                switch mode {
-                case .localOnly:
-                    skill.modelTask = nil
-                    skill.workflow?.removeAll { $0.tool.lowercased().hasPrefix("model.") }
-                    skill.requiredTools.removeAll { $0.lowercased().hasPrefix("model.") }
-                    skill.permissions.removeAll { $0 == "cloud_api" }
-                    skill.dataDisclosure = []
-                case .cloudAssisted:
-                    if skill.modelTask == nil {
-                        skill.modelTask = SkillModelTask(
-                            tool: "model.generateText",
-                            promptTemplate: skill.originalRequest + "\n\n用户本次输入：{{userInput}}",
-                            inputVariables: skill.resolvedParameters.map(\.name),
-                            providerPolicy: "userDefault"
-                        )
-                    }
-                }
-            }
-        )
-    }
-
-    private var actionsBinding: Binding<String> {
-        Binding(
-            get: { skill.actions.joined(separator: "\n") },
-            set: { value in
-                skill.actions = value
-                    .components(separatedBy: .newlines)
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-            }
-        )
-    }
-
-    private var parametersBinding: Binding<[SkillParameterDefinition]> {
-        Binding(
-            get: { skill.parameters ?? [] },
-            set: { skill.parameters = $0 }
-        )
-    }
-
-    private var modelPromptBinding: Binding<String> {
-        Binding(
-            get: { skill.modelTask?.promptTemplate ?? "" },
-            set: { value in
-                if skill.modelTask == nil {
-                    skill.modelTask = SkillModelTask(
-                        tool: "model.generateText",
-                        promptTemplate: value,
-                        inputVariables: skill.resolvedParameters.map(\.name),
-                        providerPolicy: "userDefault"
-                    )
-                } else {
-                    skill.modelTask?.promptTemplate = value
-                }
-            }
-        )
     }
 }
 
-private struct SkillParameterEditorRow: View {
-    @Binding var parameter: SkillParameterDefinition
-    let remove: () -> Void
-
-    var body: some View {
-        VStack(spacing: 7) {
-            HStack {
-                TextField("参数名称", text: $parameter.name)
-                    .textFieldStyle(.plain)
-                Picker("类型", selection: $parameter.type) {
-                    ForEach(SkillParameterType.allCases) { type in
-                        Text(type.displayName).tag(type)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 100)
-                Toggle("必填", isOn: $parameter.required)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 10.5))
-                Button(action: remove) {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-            }
-            TextField("用途或格式说明", text: $parameter.description)
-                .font(.system(size: 11))
-                .textFieldStyle(.plain)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-private struct SkillManagementMessage {
+struct SkillManagementMessage {
     let text: String
     let isError: Bool
+}
+
+private extension SkillWorkflowBinding {
+    func replacingSkillParameterPlaceholders(
+        _ replacements: [String: String]
+    ) -> SkillWorkflowBinding {
+        switch self {
+        case .template(let value):
+            return .template(value.replacingSkillParameterPlaceholders(replacements))
+        case .array(let values):
+            return .array(values.map {
+                $0.replacingSkillParameterPlaceholders(replacements)
+            })
+        case .object(let values):
+            return .object(values.mapValues {
+                $0.replacingSkillParameterPlaceholders(replacements)
+            })
+        case .userInput, .parameter, .stepOutput, .literal:
+            return self
+        }
+    }
 }
 
 private struct AIProviderSettingsView: View {
@@ -1612,6 +1484,7 @@ private struct AIProviderSettingsView: View {
                             .tag(provider)
                     }
                 }
+                .tint(.primary)
                 Text("普通问答和新技能生成会使用这里选择的服务。模型名称和地址都可以修改，不依赖写死的版本。")
                     .font(.caption)
                     .foregroundStyle(.secondary)

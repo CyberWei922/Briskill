@@ -570,26 +570,38 @@ Skill Registry
 
 运行时不让模型重新发明流程。已经保存的技能由确定性执行引擎直接运行；只有步骤明确包含文本生成，或遇到需要语义判断的条件时才调用模型。
 
-### 6.6 本地执行与云端 AI 技能
+### 6.6 本地、混合与云端技能
 
-创建技能前必须先让用户选择运行策略，两种策略共用同一个 `Skill Definition`、Tool Registry、权限系统和执行引擎：
+创建技能前必须通过紧凑的三段式选择器让用户选择运行策略。三种策略共用同一个 `Skill Definition`、Tool Registry、权限系统和执行引擎：
 
-- `localOnly`：运行时禁止调用 `model.*` 和 `cloud_api`，但不等于禁止网络。技能可以使用经过注册和授权的本地网络工具；必须声明目标主机、用途和可能离开本机的数据。
-- `cloudAssisted`：允许组合本地工具和统一的 `model.generateText`。技能保存的是以后运行时使用的提示词模板、输入变量和数据发送说明，默认使用用户设置的模型服务商，不绑定 DeepSeek、GLM、Gemini 或 OpenAI。
+- `local`：运行时禁止调用 `model.*` 和 `cloud_api`，可以使用原生 Swift 工具、AppleScript 和未来的本地模型。AppleScript 属于本地能力，不是第四种技能类型。
+- `hybrid`：工作流必须同时包含至少一个本地步骤和 `model.generateText`，用于本地读取或处理、云端生成、再写回本机的闭环。
+- `cloud`：只允许把用户直接输入的参数交给 `model.generateText`，不能主动读取剪贴板、文件、选区、屏幕、系统信息或调用 AppleScript。
 
 必须分别展示“创建技能时使用的模型”和“技能运行时是否调用云端”。一个技能可以由云端模型辅助设计，但保存后完全在本地执行；这不代表创建过程本身是离线的。
 
-两种运行路径：
+三种运行路径：
 
 ```text
-localOnly
-→ 触发器 → 本地工具/受限工作流 → 结果
+local
+→ 触发器 → Swift 工具/AppleScript/本地模型 → 结果
 
-cloudAssisted
-→ 触发器 → 本地工具（可选）→ model.generateText → 本地输出（可选）
+hybrid
+→ 触发器 → 本地步骤 → model.generateText → 本地输出
+
+cloud
+→ 触发器 → 用户直接输入 → model.generateText → 结果
 ```
 
-本地模式的网络访问必须通过具体工具和域名白名单表达，不能退化成任意 Shell 或不受控 Socket 权限。云端模式必须生成 `modelTask.promptTemplate`，并逐项声明哪些输入会发送给云端。
+本地模式的网络访问必须通过具体工具和域名白名单表达。混合与云端模式必须生成 `modelTask.promptTemplate`，并逐项声明哪些输入会发送给云端。
+
+### 6.7 AppleScript 高级技能
+
+AppleScript 不拆成 Finder、Mail 等大量用户可见类别，而作为统一的 `automation.appleScript` 高级执行能力。技能可以保存完整、可编辑的 AppleScript 源码，运行时参数通过 `on run argv` 传入，避免把用户输入直接拼进源代码。
+
+如果生成或编辑后的技能包含 AppleScript，保存前必须展示完整源码、目标应用、本地规则扫描和 AI 风险解释，并要求用户勾选“我已知晓风险”。风险确认通过源码 SHA-256 绑定；源码发生任何修改后确认自动失效。确认只发生在生成、安装或修改技能时，技能以后正常运行不再显示产品自己的重复确认框；macOS 首次控制某个目标应用时仍可能显示系统 Automation 授权提示。
+
+社区导入的 AppleScript 技能不得继承作者的风险确认状态，必须由本机用户重新阅读和确认。技能执行器提供超时、取消、stdout、stderr 和明确错误，不允许模型伪造已经执行成功。
 
 ## 7. 性能、功耗和内存约束
 
@@ -1113,16 +1125,21 @@ Demo 版本提交后，工程开始进入可运行的核心功能原型阶段。
 - 技能可导出为版本化的 `.laskill` 文件。导出包包含格式标识 `com.localassistant.skill`、Schema 版本、应用版本、导出时间和完整技能定义，不包含 API Key、生成历史或运行时输入文件。未来社区、导入、签名、作者、许可证和依赖检查必须基于这个版本化容器演进，不能直接共享内部 `skills.json`。
 - 技能生成结果包含名称、别名、说明、触发方式、步骤、输出、依赖能力、权限和自然语言解释。
 - 没有 API 时仍可用本地模板生成草稿，便于完整体验界面流程；这不等同于模型理解。
-- 用户确认后的技能以 JSON 保存在 `Application Support/LocalAssistant/Skills/skills.json`，不写入 App 包。
+- 用户确认后的技能以不可变版本 JSON 保存在 `Application Support/LocalAssistant/Skills/DefinitionsV3`，不写入 App 包；`index.json` 是唯一提交点并保留上一份可读备份。旧 `Definitions` 和 `skills.json` 仅作为迁移前备份保留。
 - 保存后的技能立即进入快捷面板搜索和预测；纯文本模型类技能可以调用当前 API 试运行。
 - 未注册工具的技能只展示真实执行计划和缺失能力，不允许模型伪造执行结果。
 - 已建立可运行的 `ToolRegistry` 与顺序 `WorkflowEngine`，当前正式注册 `clipboard.readText`、`clipboard.writeText`、`selection.readText`、`selection.replaceText`、`screen.captureRegion`、`image.ocr`、`file.readText`、`file.list`、`file.search`、`file.rename`、`file.createEmpty`、`file.trash`、`system.snapshot` 和 `model.generateText`。工作流支持 `{{参数名}}`、`$步骤变量`、`saveAs`、取消、逐步错误传播和脱敏耗时日志。
 - 内置 `move` 移动文件技能及 `file.move` 工具已经移除；新增 `new 名称.后缀` 本地技能，在 Downloads 创建空文件，并在结果区提供可拖拽、双击打开和移到废纸篓的文件卡片。
 - 文件型工具结果使用专用交互视图而不是 Markdown 路径堆叠：`new` 显示居中的文件卡片和直接打开/移到废纸篓操作；`find` 显示可交互文件列表，单击普通文件在 Finder 中定位、双击使用默认应用打开，文件夹单击或双击均直接打开。
+- Skill Runtime V3 将用户可见执行类型统一为 `local`、`hybrid`、`cloud` 三类，并兼容读取旧版 `localOnly` 与 `cloudAssisted`。V3 使用稳定参数 ID、步骤 ID 和带判别字段的类型化 Binding；执行器优先直接解析 V3，V2 workflow 只作为旧版本回退镜像。
+- 技能编辑页默认使用单列调用构建器和纵向流程卡片：调用格式实时生成；每个工具步骤默认只显示人类可读说明，展开后再选择输入来源；模型提示词属于具体模型步骤并支持插入用户参数或前序输出；工具、权限和自然语言执行说明全部由真实流程推导，不再允许多份定义漂移。
+- 高级用户仍可打开完整 Skill V3 源码，但源码与可视化草稿不实时互相覆盖；只有 JSON 解码、工具白名单、必填参数、未知参数、参数/步骤引用、引用顺序、类型兼容和执行类型检查全部通过后才能应用。
+- 新增统一 `automation.appleScript` 高级能力：生成和编辑页面可以展示、修改完整 AppleScript，使用本地规则分析目标应用、Shell、管理员权限、辅助功能、键盘模拟、删除和网络行为；用户确认通过源码 Hash 绑定，保存后运行不再重复确认。
+- 技能持久化使用 `Application Support/LocalAssistant/Skills/DefinitionsV3/<技能ID>.<提交ID>.json` 不可变定义文件和带文件映射的 `index.json`。一次保存先写完所有发生变化的定义，再原子切换索引；旧索引仍指向完整旧版本。旧 `Definitions` V2 与 `skills.json` 不覆盖、不清理；`DefinitionsV3` 存在后即为权威数据源，损坏时只做 V3 内逐文件/备份索引恢复，绝不回退 V2 覆盖新技能。
 - 所有面向用户的默认能力都必须保存成标准技能定义并出现在技能管理中，不再维护一套无法编辑的硬编码功能卡片。当前随应用安装 15 个默认技能，只额外带 `origin=builtIn` 与稳定标识；用户可以像处理自建技能一样编辑、启停、导出或删除。程序不得覆盖用户对内置技能的修改，删除后必须保存墓碑记录，后续启动或升级不能自动强制恢复。
 - “剪贴板翻译”已经完成第一个本地—云端—本地闭环：读取剪贴板纯文本，调用用户当前选择的云端模型，将最终译文写回剪贴板并同时在主面板显示。写入后会立即回读验证；剪贴板为空或写入失败时显示明确错误。
 - 早期版本生成的 `clipboard + translate` 技能即使没有 `workflow` 和 `modelTask`，运行时也会由兼容层转换成三步标准工作流，因此用户不需要重新创建原有的 `trans` 技能。
-- Tool Executor 日志只记录步骤、参数字段名、文字长度和耗时，不记录剪贴板原文或模型结果正文。Debug 构建提供 `--run-skill-debug <关键词>` 入口，可绕过 UI 对真实工作流做端到端验证；Release 构建不包含该入口。
+- Tool Executor 日志只记录步骤、参数字段名、文字长度和耗时，不记录剪贴板原文或模型结果正文。Debug 构建提供 `--run-skill-debug <关键词>` 端到端入口和 `--validate-skills-debug` 全量结构验证；Release 构建不包含这些入口。
 - 技能管理的列表和二级编辑页必须形成真正的本地导航历史：从编辑页后退到列表后，前进按钮应立即可用并能返回原技能；打开其他技能会清空该前进分支。
 - 普通自然语言技能运行时，系统提示词必须要求直接输出面向用户的 Markdown，并明确禁止用 JSON/XML 或代码围栏包装普通文字。若服务商仍误回纯 JSON 或 `json` 围栏，执行层自动转换为可读 Markdown；只有技能提示词或输出规范明确要求 JSON 时才保留结构化结果。
 - 快捷面板不能再使用“整块窗口背景都可拖动”的方式，否则会吞掉 Markdown 正文的文字框选。窗口仅允许从顶部专用留白区域拖动，搜索、建议、参数和回答区域保持正常点击与选择行为。
@@ -1139,7 +1156,7 @@ Demo 版本提交后，工程开始进入可运行的核心功能原型阶段。
 本阶段仍未完成：
 
 - 剪贴板历史与语义搜索；Apple Vision OCR、跨应用选中文字、文件搜索/整理和问题导向的系统诊断已经接入。
-- Tool Registry 的完整描述 Schema、工具级参数类型检查、风险分级、权限代理、撤销和持久化审计；最小注册表、顺序执行器和剪贴板工具已经完成。
+- Tool Registry 的权限代理、撤销和持久化审计仍待完善；工具描述、参数白名单、必填检查、输入输出类型兼容、风险分级和顺序执行器已经接入 Skill V3。
 - Spotlight App Intents / Core Spotlight 动态技能实体。
 - 本地小模型运行时。
 - 技能包导入和技能版本历史；搜索、编辑、启停、删除、`.laskill` 导出与调用历史页面已经完成。

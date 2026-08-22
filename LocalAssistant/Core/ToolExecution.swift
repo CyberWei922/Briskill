@@ -37,6 +37,8 @@ enum ToolExecutionError: LocalizedError {
     case emptyClipboard
     case clipboardWriteFailed
     case missingArgument(tool: String, argument: String)
+    case unresolvedWorkflowReference(String)
+    case unsupportedWorkflowVersion(Int)
     case missingWorkflow
     case unavailableTools([String])
     case localSkillRequestedCloudModel
@@ -61,6 +63,10 @@ enum ToolExecutionError: LocalizedError {
             "翻译已经生成，但写入剪贴板失败。请重试或手动复制结果。"
         case .missingArgument(let tool, let argument):
             "工具 \(tool) 缺少参数 \(argument)。"
+        case .unresolvedWorkflowReference(let reference):
+            "工作流引用 \(reference) 没有可用的运行时值。请检查技能参数和步骤顺序。"
+        case .unsupportedWorkflowVersion(let version):
+            "这项技能使用了较新的工作流格式（V\(version)）。请升级 Local Assistant 后再运行。"
         case .missingWorkflow:
             "这个技能还没有可执行的工作流。"
         case .unavailableTools(let tools):
@@ -134,6 +140,53 @@ private struct ToolExecutionContext {
     let files: [String: [URL]]
     let modelPromptTemplate: String?
     let reportProgress: ((Double?) -> Void)?
+}
+
+private enum WorkflowTemplateInterpolator {
+    struct Result {
+        let text: String
+        let unresolvedTokens: [String]
+    }
+
+    /// Performs one pass only, so text supplied by the user can never become a
+    /// second template and expand another variable by accident.
+    static func interpolate(
+        _ template: String,
+        variables: [String: SkillJSONValue]
+    ) -> Result {
+        var output = ""
+        var unresolved: [String] = []
+        var cursor = template.startIndex
+
+        while let opening = template.range(of: "{{", range: cursor..<template.endIndex) {
+            output += template[cursor..<opening.lowerBound]
+            guard let closing = template.range(
+                of: "}}",
+                range: opening.upperBound..<template.endIndex
+            ) else {
+                output += template[opening.lowerBound...]
+                cursor = template.endIndex
+                break
+            }
+
+            let token = String(template[opening.upperBound..<closing.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let value = variables[token] {
+                output += value.stringValue
+            } else {
+                output += template[opening.lowerBound..<closing.upperBound]
+                if !token.isEmpty, !unresolved.contains(token) {
+                    unresolved.append(token)
+                }
+            }
+            cursor = closing.upperBound
+        }
+
+        if cursor < template.endIndex {
+            output += template[cursor...]
+        }
+        return Result(text: output, unresolvedTokens: unresolved)
+    }
 }
 
 @MainActor
@@ -886,10 +939,18 @@ private final class ModelGenerateTextTool: AssistantTool {
             ?? arguments["prompt"]?.stringValue
             ?? context.skill.originalRequest
 
-        prompt = Self.interpolate(prompt, variables: context.variables)
+        let interpolation = WorkflowTemplateInterpolator.interpolate(
+            prompt,
+            variables: context.variables
+        )
+        guard interpolation.unresolvedTokens.isEmpty else {
+            throw ToolExecutionError.unresolvedWorkflowReference(
+                interpolation.unresolvedTokens.joined(separator: "、")
+            )
+        }
+        prompt = interpolation.text
         if !explicitInput.isEmpty,
-           !prompt.contains(explicitInput),
-           !context.modelPromptTemplateContainsRuntimeValue {
+           !prompt.contains(explicitInput) {
             prompt += "\n\n待处理内容：\n\(explicitInput)"
         }
 
@@ -919,21 +980,49 @@ private final class ModelGenerateTextTool: AssistantTool {
         return ToolExecutionOutput(value: .string(readableResult), displayText: readableResult)
     }
 
-    private static func interpolate(
-        _ template: String,
-        variables: [String: SkillJSONValue]
-    ) -> String {
-        variables.reduce(template) { partial, item in
-            partial.replacingOccurrences(of: "{{\(item.key)}}", with: item.value.stringValue)
-        }
-    }
-
     private static func explicitlyRequestsJSON(
         prompt: String,
         outputRequirement: String
     ) -> Bool {
         (prompt + "\n" + outputRequirement)
             .localizedCaseInsensitiveContains("json")
+    }
+}
+
+@MainActor
+private final class AppleScriptTool: AssistantTool {
+    let identifier = "automation.appleScript"
+
+    func execute(
+        arguments: [String: SkillJSONValue],
+        context: ToolExecutionContext
+    ) async throws -> ToolExecutionOutput {
+        guard let definition = context.skill.appleScript,
+              !definition.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AppleScriptExecutionError.emptySource
+        }
+        guard definition.hasValidRiskAcknowledgement else {
+            throw AppleScriptExecutionError.acknowledgementRequired
+        }
+
+        let argv: [String]
+        switch arguments["argv"] {
+        case .array(let values):
+            argv = values.map(\.stringValue)
+        case .string(let value):
+            argv = [value]
+        case nil, .null:
+            argv = definition.argumentVariables.compactMap { context.variables[$0]?.stringValue }
+        default:
+            argv = [arguments["argv"]?.stringValue ?? ""]
+        }
+
+        let output = try await AppleScriptRunner.run(
+            source: definition.source,
+            arguments: argv
+        )
+        let display = output.isEmpty ? "AppleScript 已执行完成。" : output
+        return ToolExecutionOutput(value: .string(display), displayText: display)
     }
 }
 
@@ -1009,13 +1098,6 @@ private enum ModelOutputFormatter {
     }
 }
 
-private extension ToolExecutionContext {
-    var modelPromptTemplateContainsRuntimeValue: Bool {
-        guard let modelPromptTemplate else { return false }
-        return variables.keys.contains { modelPromptTemplate.contains("{{\($0)}}") }
-    }
-}
-
 @MainActor
 final class ToolRegistry {
     static let shared = ToolRegistry()
@@ -1037,6 +1119,7 @@ final class ToolRegistry {
         register(FileCreateEmptyTool())
         register(FileTrashTool())
         register(SystemSnapshotTool())
+        register(AppleScriptTool())
         register(ModelGenerateTextTool())
     }
 
@@ -1073,6 +1156,8 @@ final class ToolRegistry {
             return "file.trash"
         case "system.snapshot", "system.metricssnapshot", "system.metrics", "process.topconsumers":
             return "system.snapshot"
+        case "applescript", "automation.applescript", "script.applescript":
+            return "automation.appleScript"
         case "model", "model.generatetext", "text.generation", "translate", "summarize", "rewrite":
             return "model.generateText"
         default:
@@ -1088,13 +1173,48 @@ final class ToolRegistry {
         tool(for: rawIdentifier) != nil
     }
 
+    func descriptor(for rawIdentifier: String) -> ToolDescriptor? {
+        ToolDescriptorCatalog.byIdentifier[canonicalIdentifier(for: rawIdentifier)]
+    }
+
+    var descriptors: [ToolDescriptor] {
+        ToolDescriptorCatalog.all
+    }
+
     private func register(_ tool: any AssistantTool) {
         tools[tool.identifier] = tool
     }
 }
 
+private struct ExecutableWorkflowStep {
+    let id: String
+    let tool: String
+    let legacyArguments: [String: SkillJSONValue]
+    let typedArguments: [String: SkillWorkflowBinding]?
+    let saveAs: String?
+    let promptTemplate: String?
+
+    init(legacy step: SkillWorkflowStep, promptTemplate: String? = nil) {
+        id = step.id
+        tool = step.tool
+        legacyArguments = step.arguments
+        typedArguments = nil
+        saveAs = step.saveAs
+        self.promptTemplate = promptTemplate
+    }
+
+    init(v3 step: SkillWorkflowStepV3, fallbackPromptTemplate: String?) {
+        id = step.id
+        tool = step.toolID
+        legacyArguments = [:]
+        typedArguments = step.arguments
+        saveAs = step.outputName ?? step.id
+        promptTemplate = step.promptTemplate ?? fallbackPromptTemplate
+    }
+}
+
 private struct ExecutableWorkflow {
-    let steps: [SkillWorkflowStep]
+    let steps: [ExecutableWorkflowStep]
     let modelPromptTemplate: String?
 }
 
@@ -1109,6 +1229,10 @@ final class WorkflowEngine {
     }
 
     func readiness(for skill: UserSkill) -> WorkflowReadiness {
+        if let definition = skill.workflowV3,
+           definition.version > SkillWorkflowDefinitionV3.currentVersion {
+            return .unavailable(["workflow.v\(definition.version)"])
+        }
         guard let workflow = executableWorkflow(for: skill), !workflow.steps.isEmpty else {
             return .unavailable(["workflow"])
         }
@@ -1119,6 +1243,9 @@ final class WorkflowEngine {
         }
         for requiredTool in skill.requiredTools where !registry.contains(requiredTool) {
             unavailable.insert(requiredTool)
+        }
+        if skill.containsAppleScript, !skill.hasValidAppleScriptRiskAcknowledgement {
+            unavailable.insert("appleScript.riskAcknowledgement")
         }
 
         return unavailable.isEmpty
@@ -1133,6 +1260,10 @@ final class WorkflowEngine {
         files: [String: [URL]],
         progress: ((WorkflowExecutionProgress) -> Void)? = nil
     ) async throws -> WorkflowExecutionResult {
+        if let definition = skill.workflowV3,
+           definition.version > SkillWorkflowDefinitionV3.currentVersion {
+            throw ToolExecutionError.unsupportedWorkflowVersion(definition.version)
+        }
         guard let workflow = executableWorkflow(for: skill), !workflow.steps.isEmpty else {
             throw ToolExecutionError.missingWorkflow
         }
@@ -1154,8 +1285,11 @@ final class WorkflowEngine {
             guard let tool = registry.tool(for: canonicalID) else {
                 throw ToolExecutionError.unavailableTools([step.tool])
             }
-            if skill.resolvedExecutionMode == .localOnly, canonicalID == "model.generateText" {
+            if skill.resolvedExecutionMode == .local, canonicalID == "model.generateText" {
                 throw ToolExecutionError.localSkillRequestedCloudModel
+            }
+            if skill.resolvedExecutionMode == .cloud, canonicalID != "model.generateText" {
+                throw ToolExecutionError.unavailableTools(["云端技能不能调用本地工具：\(canonicalID)"])
             }
 
             progress?(
@@ -1167,13 +1301,36 @@ final class WorkflowEngine {
                 )
             )
 
-            let arguments = step.arguments.mapValues { resolve($0, variables: variables) }
+            let arguments: [String: SkillJSONValue]
+            if let typedArguments = step.typedArguments {
+                var resolvedArguments: [String: SkillJSONValue] = [:]
+                let requiredNames = Set(
+                    registry.descriptor(for: canonicalID)?.arguments
+                        .filter(\.required)
+                        .map(\.name) ?? []
+                )
+                for (name, binding) in typedArguments {
+                    guard let value = resolve(binding, variables: variables), value != .null else {
+                        if requiredNames.contains(name) {
+                            throw ToolExecutionError.missingArgument(
+                                tool: canonicalID,
+                                argument: name
+                            )
+                        }
+                        continue
+                    }
+                    resolvedArguments[name] = value
+                }
+                arguments = resolvedArguments
+            } else {
+                arguments = step.legacyArguments.mapValues { resolve($0, variables: variables) }
+            }
             let context = ToolExecutionContext(
                 skill: skill,
                 userInput: input,
                 variables: variables,
                 files: files,
-                modelPromptTemplate: workflow.modelPromptTemplate,
+                modelPromptTemplate: step.promptTemplate ?? workflow.modelPromptTemplate,
                 reportProgress: { toolFraction in
                     Task { @MainActor in
                         progress?(
@@ -1202,7 +1359,9 @@ final class WorkflowEngine {
                 )
                 executedTools.append(canonicalID)
                 variables[step.id] = output.value
-                variables["step_\(index + 1)"] = output.value
+                if step.typedArguments == nil {
+                    variables["step_\(index + 1)"] = output.value
+                }
                 variables["lastResult"] = output.value
                 if let saveAs = step.saveAs, !saveAs.isEmpty {
                     variables[saveAs] = output.value
@@ -1246,9 +1405,21 @@ final class WorkflowEngine {
     }
 
     private func executableWorkflow(for skill: UserSkill) -> ExecutableWorkflow? {
+        if let definition = skill.workflowV3, !definition.steps.isEmpty {
+            return ExecutableWorkflow(
+                steps: definition.steps.map {
+                    ExecutableWorkflowStep(
+                        v3: $0,
+                        fallbackPromptTemplate: skill.modelTask?.promptTemplate
+                    )
+                },
+                modelPromptTemplate: skill.modelTask?.promptTemplate
+            )
+        }
+
         if let workflow = skill.workflow, !workflow.isEmpty {
             return ExecutableWorkflow(
-                steps: workflow,
+                steps: workflow.map { ExecutableWorkflowStep(legacy: $0) },
                 modelPromptTemplate: skill.modelTask?.promptTemplate
             )
         }
@@ -1274,7 +1445,7 @@ final class WorkflowEngine {
                         arguments: ["text": .string("$translatedText")],
                         saveAs: "clipboardResult"
                     )
-                ],
+                ].map { ExecutableWorkflowStep(legacy: $0) },
                 modelPromptTemplate: legacyClipboardTranslationPrompt(for: skill)
             )
         }
@@ -1288,7 +1459,7 @@ final class WorkflowEngine {
                         arguments: ["input": .string("{{userInput}}")],
                         saveAs: "modelResult"
                     )
-                ],
+                ].map { ExecutableWorkflowStep(legacy: $0) },
                 modelPromptTemplate: modelTask.promptTemplate
             )
         }
@@ -1367,16 +1538,53 @@ final class WorkflowEngine {
                let variable = variables[String(string.dropFirst(2).dropLast(2))] {
                 return variable
             }
-            let resolved = variables.reduce(string) { partial, item in
-                partial.replacingOccurrences(of: "{{\(item.key)}}", with: item.value.stringValue)
-            }
-            return .string(resolved)
+            return .string(
+                WorkflowTemplateInterpolator.interpolate(
+                    string,
+                    variables: variables
+                ).text
+            )
         case .array(let values):
             return .array(values.map { resolve($0, variables: variables) })
         case .object(let values):
             return .object(values.mapValues { resolve($0, variables: variables) })
         default:
             return value
+        }
+    }
+
+    private func resolve(
+        _ binding: SkillWorkflowBinding,
+        variables: [String: SkillJSONValue]
+    ) -> SkillJSONValue? {
+        switch binding {
+        case .userInput:
+            return variables["userInput"]
+        case .parameter(let identifier), .stepOutput(let identifier):
+            return variables[identifier]
+        case .literal(let value):
+            return value
+        case .template(let value):
+            let interpolation = WorkflowTemplateInterpolator.interpolate(
+                value,
+                variables: variables
+            )
+            guard interpolation.unresolvedTokens.isEmpty else { return nil }
+            return .string(interpolation.text)
+        case .array(let values):
+            var resolved: [SkillJSONValue] = []
+            for value in values {
+                guard let item = resolve(value, variables: variables) else { return nil }
+                resolved.append(item)
+            }
+            return .array(resolved)
+        case .object(let values):
+            var resolved: [String: SkillJSONValue] = [:]
+            for (key, value) in values {
+                guard let item = resolve(value, variables: variables) else { return nil }
+                resolved[key] = item
+            }
+            return .object(resolved)
         }
     }
 }

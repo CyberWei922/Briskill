@@ -36,6 +36,7 @@ struct ConsoleView: View {
                     Text(level.displayName).tag(level as ConsoleLevel?)
                 }
             }
+            .tint(.primary)
             .frame(width: 110)
 
             Text("\(filteredEntries.count) 条")

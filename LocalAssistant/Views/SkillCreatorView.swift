@@ -6,7 +6,7 @@ struct SkillCreatorView: View {
     @ObservedObject private var skillStore = SkillStore.shared
     @AppStorage("appAccent") private var appAccent = AppAccent.purple.rawValue
 
-    @State private var executionMode: SkillExecutionMode = .localOnly
+    @State private var executionMode: SkillExecutionMode = .local
     @AppStorage("skillCreator.deepThinkingEnabled") private var deepThinkingEnabled = true
     @State private var mode: SkillCreationMode = .guided
     @State private var guidedStep = 0
@@ -114,6 +114,7 @@ struct SkillCreatorView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .tint(.primary)
                     .fixedSize()
                     .disabled(isGenerating)
                 }
@@ -517,7 +518,7 @@ struct SkillCreatorView: View {
         }
         generationID = UUID()
         generationTask = nil
-        executionMode = .localOnly
+        executionMode = .local
         mode = .guided
         guidedStep = 0
         skillName = ""
@@ -911,64 +912,40 @@ private struct ExecutionModePicker: View {
     @Binding var selection: SkillExecutionMode
 
     var body: some View {
-        HStack(spacing: 10) {
-            modeButton(
-                .localOnly,
-                symbol: "desktopcomputer",
-                detail: "工具、工作流与受控网络"
-            )
-            modeButton(
-                .cloudAssisted,
-                symbol: "cloud",
-                detail: "本地工具 + 模型生成"
-            )
-        }
-    }
+        HStack(alignment: .center, spacing: 18) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("执行类型")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(selection.compactDescription)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
 
-    private func modeButton(
-        _ mode: SkillExecutionMode,
-        symbol: String,
-        detail: String
-    ) -> some View {
-        let isSelected = selection == mode
-        let accentColor: Color = isSelected ? .indigo : .secondary
-        let iconBackground: Color = isSelected ? Color.indigo.opacity(0.08) : Color.primary.opacity(0.08)
-        let cardBackground: Color = isSelected ? Color.indigo.opacity(0.075) : Color.primary.opacity(0.035)
-        let borderColor: Color = isSelected ? Color.indigo.opacity(0.4) : Color.primary.opacity(0.06)
+            Spacer(minLength: 12)
 
-        return Button {
-            selection = mode
-        } label: {
-            HStack(spacing: 9) {
-                Image(systemName: symbol)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(accentColor)
-                    .frame(width: 25, height: 25)
-                    .background(iconBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(mode.displayName)
-                        .font(.system(size: 12, weight: .semibold))
-                    Text(detail)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.secondary)
+            Picker("执行类型", selection: $selection) {
+                ForEach(SkillExecutionMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
                 }
-
-                Spacer(minLength: 4)
-
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(accentColor)
             }
-            .padding(.horizontal, 11)
-            .frame(maxWidth: .infinity, minHeight: 54)
-            .background(cardBackground, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .strokeBorder(borderColor, lineWidth: isSelected ? 1.2 : 0.7)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .tint(.primary)
+            .fixedSize()
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: 54)
+        .background(
+            Color.primary.opacity(0.045),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.05), lineWidth: 0.7)
+        }
+        .help(selection.compactDescription)
     }
 }
 
@@ -1102,6 +1079,7 @@ private struct ParameterDefinitionRow: View {
                     }
                 }
                 .labelsHidden()
+                .tint(.primary)
                 .frame(width: 104)
 
                 Toggle("必填", isOn: $parameter.required)
@@ -1214,12 +1192,10 @@ private struct SkillDraftPreview: View {
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(
-                            draft.resolvedExecutionMode == .localOnly
-                                ? Color.green.opacity(0.11)
-                                : Color.indigo.opacity(0.10),
+                            executionTint.opacity(0.11),
                             in: Capsule()
                         )
-                        .foregroundStyle(draft.resolvedExecutionMode == .localOnly ? Color.green : Color.indigo)
+                        .foregroundStyle(executionTint)
                     Text("由 \(source) 设计")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.tertiary)
@@ -1316,6 +1292,41 @@ private struct SkillDraftPreview: View {
                         }
                     }
 
+                    if draft.appleScript != nil {
+                        PreviewSection(title: "AppleScript", symbol: "applescript") {
+                            TextEditor(text: appleScriptSourceBinding)
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .frame(minHeight: 180)
+                                .scrollContentBackground(.hidden)
+                                .padding(10)
+                                .background(Color.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                            let report = AppleScriptRiskAnalyzer.analyze(draft.appleScript?.source ?? "")
+                            HStack(spacing: 8) {
+                                Text("风险：\(report.riskLevel.displayName)")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(report.riskLevel == .critical ? Color.red : Color.orange)
+                                if !report.targetApplications.isEmpty {
+                                    Text("目标：\(report.targetApplications.joined(separator: "、"))")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            ForEach(report.notes, id: \.self) { note in
+                                Label(note, systemImage: "exclamationmark.triangle")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.orange)
+                            }
+
+                            Toggle(isOn: appleScriptAcknowledgementBinding) {
+                                Text("我已阅读生成的 AppleScript，并知晓运行该脚本可能操作其他应用或本地数据")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .toggleStyle(.checkbox)
+                            .padding(.top, 4)
+                        }
+                    }
+
                     if let hosts = draft.networkHosts, !hosts.isEmpty {
                         PreviewSection(title: "网络访问", symbol: "network") {
                             FlowTags(values: hosts, tint: .blue)
@@ -1367,11 +1378,58 @@ private struct SkillDraftPreview: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
+                .disabled(
+                    draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || isSaving
+                        || requiresAppleScriptAcknowledgement
+                )
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
         }
+    }
+
+    private var executionTint: Color {
+        switch draft.resolvedExecutionMode {
+        case .local: .green
+        case .hybrid: .indigo
+        case .cloud: .blue
+        }
+    }
+
+    private var requiresAppleScriptAcknowledgement: Bool {
+        guard let appleScript = draft.appleScript else { return false }
+        return !appleScript.hasValidRiskAcknowledgement
+    }
+
+    private var appleScriptSourceBinding: Binding<String> {
+        Binding(
+            get: { draft.appleScript?.source ?? "" },
+            set: { value in
+                guard var definition = draft.appleScript else { return }
+                definition.source = value
+                definition.invalidateAcknowledgement()
+                let report = AppleScriptRiskAnalyzer.analyze(value)
+                definition.targetApplications = report.targetApplications
+                definition.riskNotes = report.notes
+                draft.appleScript = definition
+            }
+        )
+    }
+
+    private var appleScriptAcknowledgementBinding: Binding<Bool> {
+        Binding(
+            get: { draft.appleScript?.hasValidRiskAcknowledgement == true },
+            set: { accepted in
+                guard var definition = draft.appleScript else { return }
+                if accepted {
+                    definition.acknowledgeCurrentSource()
+                } else {
+                    definition.invalidateAcknowledgement()
+                }
+                draft.appleScript = definition
+            }
+        )
     }
 }
 

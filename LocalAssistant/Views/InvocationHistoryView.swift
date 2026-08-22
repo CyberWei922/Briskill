@@ -50,7 +50,7 @@ struct InvocationHistorySettingsView: View {
 
                             if index + 1 < filteredRecords.count {
                                 Divider()
-                                    .padding(.leading, 56)
+                                    .padding(.horizontal, 14)
                             }
                         }
                     }

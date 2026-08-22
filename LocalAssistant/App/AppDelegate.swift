@@ -102,6 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppConsole.shared.info("应用启动完成，全局快捷键已注册", category: "Lifecycle")
 
 #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--validate-skills-debug") {
+            Task { @MainActor in
+                validateStoredSkills()
+            }
+            return
+        }
         if let keyword = debugSkillKeyword {
             Task { @MainActor in
                 await runDebugSkill(keyword: keyword)
@@ -110,7 +116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 #endif
 
-        if ProcessInfo.processInfo.arguments.contains("--show-panel") {
+        if ProcessInfo.processInfo.arguments.contains("--show-settings") {
+            DispatchQueue.main.async {
+                SettingsWindowController.shared.show()
+            }
+        } else if ProcessInfo.processInfo.arguments.contains("--show-panel") {
             DispatchQueue.main.async {
                 PanelController.shared.show()
             }
@@ -138,6 +148,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
 #if DEBUG
+    @MainActor
+    private func validateStoredSkills() {
+        let skills = SkillStore.shared.skills
+        var errorCount = 0
+        var warningCount = 0
+        for skill in skills {
+            let issues = SkillWorkflowValidator.validate(
+                skill.resolvedWorkflowV3,
+                parameters: skill.resolvedParameters,
+                executionMode: skill.resolvedExecutionMode,
+                modelTask: skill.modelTask,
+                appleScript: skill.appleScript
+            )
+            errorCount += issues.filter { $0.severity == .error }.count
+            warningCount += issues.filter { $0.severity == .warning }.count
+            for issue in issues where issue.severity == .error {
+                writeDebugOutput("SKILL_V3_INVALID skill=\(skill.name) issue=\(issue.message)\n")
+            }
+        }
+        writeDebugOutput(
+            "SKILL_V3_VALIDATION skills=\(skills.count) errors=\(errorCount) warnings=\(warningCount)\n"
+        )
+        NSApplication.shared.terminate(nil)
+    }
+
     private var debugSkillKeyword: String? {
         let arguments = ProcessInfo.processInfo.arguments
         guard let flagIndex = arguments.firstIndex(of: "--run-skill-debug"),
