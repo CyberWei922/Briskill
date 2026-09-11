@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Briskill";
+"NSAppleEventsUsageDescription" = "Briskill controls only the apps declared by an AppleScript skill that you explicitly save and run.";
+"NSScreenCaptureUsageDescription" = "Briskill reads only the screen region you explicitly select when running a screenshot OCR skill.";
